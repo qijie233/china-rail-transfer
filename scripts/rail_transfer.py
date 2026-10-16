@@ -82,6 +82,7 @@ DEFAULT_AUTO_HUBS = 16            # 自动模式枢纽数上限。实测 12306 �
                                   # 地理就近的十几个；要更全可以调大，代价是可能被限流。
 DEFAULT_CONCURRENCY = 2           # 并发越高越容易触发限流，默认保守
 DEFAULT_CACHE_TTL = 600           # 查询结果磁盘缓存秒数：反复微调参数时不必重复打 12306
+DEFAULT_PRICE_LIMIT = 8           # --with-price 时最多为多少趟车补票价（每趟一次请求）
 QUERY_RETRIES = 2
 
 # 返回行（58 列，`|` 分隔）中本脚本用得到的下标，均为 2026-10 实测确认
@@ -98,6 +99,17 @@ IDX_YZ = 30               # 硬座 / 二等（普速为硬座）
 IDX_ZE = 31               # 二等座
 IDX_ZY = 32               # 一等座
 IDX_SWZ = 33              # 商务座
+
+# 席别代码 → 中文名。9/M/O/WZ/1/3/4/6 为 2026-10 实测确认，
+# 其余为 12306 通用代码，遇到不认识的会原样显示成「席别X」而不是瞎猜。
+SEAT_NAMES = {
+    "9": "商务座", "P": "特等座", "M": "一等座", "O": "二等座", "S": "商务座",
+    "1": "硬座", "2": "软座", "3": "硬卧", "4": "软卧", "5": "包厢硬卧",
+    "6": "高级软卧", "W": "高级动卧", "WZ": "无座",
+}
+
+# 12306 的「城市编码」是沿铁路地理顺序编排的（黑龙江 00xx → 新疆 24xx），
+# 详见 _pick_hubs_geographically 的注释。
 
 # 失败分类（对齐 shared/failure-taxonomy.md）
 FC_ENV = "environment-missing"
@@ -155,6 +167,12 @@ class Train:
     ze: str = ""
     zy: str = ""
     swz: str = ""
+    # 查票价接口 queryTicketPrice 需要的四个参数（下标均于 2026-10 实测确认）
+    train_no: str = ""
+    from_station_no: str = ""
+    to_station_no: str = ""
+    seat_types: str = ""
+    prices: dict[str, str] | None = None   # 席别代码 → 票价字符串；None 表示尚未查询
 
     def dep_dt(self) -> datetime | None:
         return _clock_to_dt(self.date, self.dep)
@@ -183,6 +201,18 @@ class Train:
             if val and val not in ("", "--", "*", "无"):
                 return True
         return False
+
+    def prices_text(self, limit: int = 3) -> str:
+        """票价的紧凑显示：按价格从低到高，最多列几个席别。"""
+        if not self.prices:
+            return ""
+        items = sorted(self.prices.items(), key=lambda kv: _price_value(kv[1]))
+        return " ".join(f"{name}{val}" for name, val in items[:limit])
+
+    def cheapest(self) -> float:
+        if not self.prices:
+            return 1e9
+        return min(_price_value(v) for v in self.prices.values())
 
 
 @dataclass
@@ -253,6 +283,14 @@ def _fmt_minutes(total: int) -> str:
     if h:
         return f"{h}小时"
     return f"{m}分"
+
+
+def _fmt_price(prices: dict) -> str:
+    """票价的紧凑渲染；按价格从低到高，最多三个席别。"""
+    if not prices:
+        return ""
+    items = sorted(prices.items(), key=lambda kv: _price_value(kv[1]))
+    return "   票价 " + " ".join(f"{name}{val}" for name, val in items[:3])
 
 
 def _now_minutes() -> int:
@@ -661,6 +699,22 @@ class BrowserSession:
         except json.JSONDecodeError:
             return {"_err": "返回内容不是合法 JSON"}
 
+    def query_price(self, train: Train) -> dict:
+        """查询某趟车在某区间的票价。
+
+        参数全部取自余票行，所以必须先查过余票才能查票价。
+        """
+        if not (train.train_no and train.from_station_no
+                and train.to_station_no and train.seat_types):
+            return {"_err": "余票行缺少 train_no / from_station_no / to_station_no / seat_types"}
+        url = (f"{API_BASE}/otn/leftTicket/queryTicketPrice"
+               f"?train_no={train.train_no}"
+               f"&from_station_no={train.from_station_no}"
+               f"&to_station_no={train.to_station_no}"
+               f"&seat_types={train.seat_types}"
+               f"&train_date={train.date}")
+        return _decode(self.evaluate(_PRICE_JS % json.dumps(url)))
+
 
 # 页面内查询脚本。只回传需要的列，避免几百 KB 的原始行穿网。
 _QUERY_JS = """
@@ -674,12 +728,31 @@ _QUERY_JS = """
     const j = await r.json();
     const d = j.data || {};
     const rows = (d.result || []).map(s => s.split("|"));
-    const idx = [3, 4, 5, 6, 7, 8, 9, 10, 26, 30, 31, 32, 33];
+    const idx = [3, 4, 5, 6, 7, 8, 9, 10, 26, 30, 31, 32, 33, 2, 16, 17, 35];
     return JSON.stringify({
       _ok: 1,
       map: d.map || {},
       rows: rows.map(f => idx.map(i => f[i] === undefined ? "" : f[i]))
     });
+  } catch (e) {
+    return JSON.stringify({_err: String((e && e.message) || e)});
+  }
+})()
+"""
+
+
+# 页面内票价查询脚本。参数取自余票行：train_no=[2]、from_station_no=[16]、
+# to_station_no=[17]、seat_types=[35]（均为 2026-10 实测确认）。
+_PRICE_JS = """
+(async () => {
+  try {
+    const r = await fetch(%s, {
+      credentials: "include",
+      headers: {"X-Requested-With": "XMLHttpRequest"}
+    });
+    if (r.status !== 200) return JSON.stringify({_http: r.status});
+    const j = await r.json();
+    return JSON.stringify({_ok: 1, data: (j && j.data) || {}});
   } catch (e) {
     return JSON.stringify({_err: String((e && e.message) || e)});
   }
@@ -697,6 +770,53 @@ def _extract_value(msg: dict) -> Any:
         desc = (detail.get("exception") or {}).get("description") or detail.get("text")
         raise RuntimeError(f"页面异常：{desc}")
     return result.get("value")
+
+
+def _price_value(text: str) -> float:
+    """把 "¥32.5" 解析成 32.5，用于排序与比较；解析不了就当很大。"""
+    try:
+        return float(str(text).lstrip("¥￥").strip())
+    except (TypeError, ValueError):
+        return 1e9
+
+
+def _parse_price(data: dict) -> dict[str, str]:
+    """把 queryTicketPrice 的 data 解析成 {席别中文名: 票价字符串}。
+
+    返回体实测有两套写法，两种都要认：
+      {"A1":"¥32.5","1":"325", ...}      A 前缀是带 ¥ 的显示价，裸键是 ×10 的整数
+      {"M":"¥124.0","O":"¥77.0", ...}    直接就是带 ¥ 的显示价
+    优先采用带 ¥ 的显示值，避免自己做除法引入误差。
+    """
+    prices: dict[str, str] = {}
+    if not isinstance(data, dict):
+        return prices
+
+    def put(code: str, value: str) -> None:
+        code = code.strip()
+        if not code:
+            return
+        name = SEAT_NAMES.get(code, f"席别{code}")
+        if name not in prices:      # 先写入的优先（A 前缀带 ¥ 的最准）
+            prices[name] = value.strip()
+
+    def usable(key: str, val: Any) -> bool:
+        return (key not in ("OT", "train_no") and isinstance(val, str) and bool(val))
+
+    for key, val in data.items():                       # 第一轮：A 前缀
+        if usable(key, val) and key.startswith("A") and len(key) > 1:
+            put(key[1:], val)
+    for key, val in data.items():                       # 第二轮：裸键兜底
+        if not usable(key, val) or key.startswith("A"):
+            continue
+        if val.startswith("¥") or val.startswith("￥"):
+            put(key, val)
+        else:
+            try:
+                put(key, f"¥{int(val) / 10:.1f}")
+            except (TypeError, ValueError):
+                continue
+    return prices
 
 
 def _free_port() -> int:
@@ -765,7 +885,7 @@ class QueryCache:
         if not rec or time.time() - rec.get("t", 0) >= self.ttl:
             return None
         rows = rec.get("rows")
-        if not isinstance(rows, list):
+        if not isinstance(rows, (list, dict)):
             return None
         self.hits += 1
         return rows
@@ -810,6 +930,7 @@ class QueryEngine:
         self.verbose = verbose
         self.disk = disk
         self.cache: dict[tuple[str, str, str], list[Train]] = {}
+        self.price_cache: dict[tuple, dict[str, str]] = {}
         self.errors: list[str] = []
         self.calls = 0
         self._delay = 0.2        # 自适应节流间隔，失败就放慢、顺利就提速
@@ -886,6 +1007,56 @@ class QueryEngine:
 
         return {job: self.cache.get(self._key(*job), []) for job in jobs}
 
+    def query_prices(self, trains: list[Train], limit: int = 0) -> int:
+        """批量补票价，返回实际发出的查询次数。
+
+        每次票价查询都是一次真实请求，12306 会按累计请求量限流，所以：
+          · 同一「车次 + 区间 + 日期」只查一次（内存 + 磁盘双层缓存）
+          · limit > 0 时只处理前 limit 趟，用来把请求量钉死在上限内
+        """
+        sent = 0
+        targets = trains[:limit] if limit > 0 else trains
+        for train in targets:
+            key = (train.train_no, train.from_station_no,
+                   train.to_station_no, train.date)
+            if key in self.price_cache:
+                train.prices = self.price_cache[key]
+                continue
+
+            disk_key = ("price",) + key
+            disk_hit = self.disk.get(disk_key) if self.disk else None
+            if isinstance(disk_hit, dict):
+                train.prices = disk_hit
+                self.price_cache[key] = disk_hit
+                continue
+
+            prices: dict[str, str] = {}
+            reason = ""
+            for attempt in range(QUERY_RETRIES + 1):
+                self.calls += 1
+                sent += 1
+                try:
+                    payload = self.session.query_price(train)
+                except RuntimeError as exc:
+                    reason = str(exc)
+                    time.sleep(0.8)
+                    continue
+                if payload.get("_ok"):
+                    prices = _parse_price(payload.get("data") or {})
+                    reason = ""
+                    break
+                reason = payload.get("_err") or f"HTTP {payload.get('_http')}"
+                time.sleep(0.8)
+
+            if reason:
+                self.errors.append(f"票价 {train.code}: {reason}")
+            train.prices = prices
+            self.price_cache[key] = prices
+            if self.disk:
+                self.disk.put(disk_key, prices)
+            time.sleep(self._delay)
+        return sent
+
 
 def _parse_rows(payload: dict, from_code: str, to_code: str, date_str: str) -> list[Train]:
     """解析返回行。
@@ -910,6 +1081,10 @@ def _parse_rows(payload: dict, from_code: str, to_code: str, date_str: str) -> l
             wz=f[8], yz=f[9], ze=f[10],
             zy=f[11] if len(f) > 11 else "",
             swz=f[12] if len(f) > 12 else "",
+            train_no=f[13] if len(f) > 13 else "",
+            from_station_no=f[14] if len(f) > 14 else "",
+            to_station_no=f[15] if len(f) > 15 else "",
+            seat_types=f[16] if len(f) > 16 else "",
             date=date_str,
         ))
     return trains
@@ -1257,7 +1432,8 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
     else:
         for t in directs[:8]:
             lines.append(f"   {t['code']:<7} {t['from_name']} {t['dep']} → "
-                         f"{t['to_name']} {t['arr']}  历时 {t['lishi']}  余票 {t['seats']}")
+                         f"{t['to_name']} {t['arr']}  历时 {t['lishi']}  余票 {t['seats']}"
+                         f"{_fmt_price(t.get('prices') or {})}")
         if len(directs) > 8:
             lines.append(f"   …… 另有 {len(directs) - 8} 趟直达车")
     lines.append("")
@@ -1276,15 +1452,18 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
                 hub_txt = (f"{p['hub_arrive']} → {p['hub_depart']}"
                            f"（异站 · {p['hub_city']}）")
                 extra = f" · 站间通勤 {p['interstation_min']} 分{est}"
-            lines.append(f"{i:>2}. 总耗时 {p['total']}   换乘 {hub_txt}{extra}")
+            total_txt = f"总耗时 {p['total']}"
+            if p.get("min_total"):
+                total_txt += f"   最低合计 {p['min_total']}"
+            lines.append(f"{i:>2}. {total_txt}   换乘 {hub_txt}{extra}")
             lines.append(f"    1) {p['leg1']['code']:<7} {p['leg1']['from_name']} "
                          f"{p['leg1']['dep']} → {p['leg1']['to_name']} {p['leg1']['arr']}"
-                         f"   余票 {p['leg1']['seats']}")
+                         f"   余票 {p['leg1']['seats']}{_fmt_price(p['leg1'].get('prices') or {})}")
             ok = "✓" if p["gap_min"] >= p["required_min"] else "✗"
             lines.append(f"       ↓ 缓冲 {p['gap_min']} 分钟（要求 ≥{p['required_min']}）{ok}")
             lines.append(f"    2) {p['leg2']['code']:<7} {p['leg2']['from_name']} "
                          f"{p['leg2']['dep']} → {p['leg2']['to_name']} {p['leg2']['arr']}"
-                         f"   余票 {p['leg2']['seats']}")
+                         f"   余票 {p['leg2']['seats']}{_fmt_price(p['leg2'].get('prices') or {})}")
     lines.append("")
 
     if res.get("warnings"):
@@ -1481,6 +1660,7 @@ def cmd_query(args, table: StationTable) -> Outcome:
         out.next_action = "检查 Edge 是否可用；若 12306 风控，稍后重试或降低 --auto-hubs"
         return out
 
+    price_calls = 0
     try:
         engine = QueryEngine(session, table, concurrency=args.concurrency,
                              verbose=args.verbose, disk=cache)
@@ -1502,6 +1682,20 @@ def cmd_query(args, table: StationTable) -> Outcome:
             if args.require_seats:
                 plans = [p for p in plans if p.leg1.has_seat() and p.leg2.has_seat()]
             plans = dedupe_and_rank(plans, args.max_results)
+
+        # 票价（可选）。只补要展示的那几趟车，并把总量钉死在 --price-limit，
+        # 因为票价是「每趟车一次请求」，不加限制很容易触发 12306 限流。
+        if args.with_price:
+            wanted: list[Train] = []
+            for plan in plans[:args.price_limit]:
+                wanted.append(plan.leg1)
+                wanted.append(plan.leg2)
+            spare = max(0, args.price_limit - len(wanted))
+            if spare:
+                wanted.extend(direct_trains[:spare])
+            price_calls = engine.query_prices(wanted, limit=args.price_limit * 2)
+        else:
+            price_calls = 0
     finally:
         session.close()
         cache.save()
@@ -1530,6 +1724,7 @@ def cmd_query(args, table: StationTable) -> Outcome:
         "min_transfer": args.min_transfer,
         "cross_station_buffer": args.cross_station_buffer,
         "queries": engine.calls,
+        "price_calls": price_calls,
         "warnings": warnings,
         "errors": engine.errors,
         "direct": [_train_json(t, table) for t in direct_trains[:40]],
@@ -1561,11 +1756,23 @@ def cmd_query(args, table: StationTable) -> Outcome:
     out.data = res
     out.evidence = [f"查询次数 {engine.calls}（缓存命中 {cache.hits} 个城市对）",
                     f"直达 {len(direct_trains)} 趟，换乘 {len(plans)} 条"]
+    if price_calls:
+        out.evidence.append(f"其中票价查询 {price_calls} 次")
     if warnings:
         out.evidence.extend(warnings[:5])
     out.next_action = ("python scripts/rail_transfer.py --from ... --to ... "
                        "--date ... --via <中转站>")
     return out
+
+
+def _min_total_text(p: Plan) -> str:
+    """两段各自最便宜席别之和，仅作比价参考（可能混席别，所以标注为「最低合计」）。"""
+    if not (p.leg1.prices and p.leg2.prices):
+        return ""
+    lo1, lo2 = p.leg1.cheapest(), p.leg2.cheapest()
+    if lo1 >= 1e9 or lo2 >= 1e9:
+        return ""
+    return f"¥{lo1 + lo2:.1f}"
 
 
 def _train_json(t: Train, table: StationTable) -> dict:
@@ -1577,6 +1784,7 @@ def _train_json(t: Train, table: StationTable) -> dict:
         "end_name": table.name_of(t.end_code),
         "dep": t.dep, "arr": t.arr, "lishi": t.lishi, "date": t.date,
         "seats": t.seats_text(),
+        "prices": dict(t.prices) if t.prices else {},
     }
 
 
@@ -1592,6 +1800,7 @@ def _plan_json(p: Plan, table: StationTable) -> dict:
         "interstation_estimated": p.interstation_estimated,
         "total": _fmt_minutes(p.total_min()),
         "total_min": p.total_min(),
+        "min_total": _min_total_text(p),
         "leg1": _train_json(p.leg1, table),
         "leg2": _train_json(p.leg2, table),
     }
@@ -1619,6 +1828,10 @@ def build_parser() -> argparse.ArgumentParser:
                    action="store_false", help="禁止同城异站换乘")
     p.add_argument("--allow-overnight", action="store_true", help="允许第二程跨到次日")
     p.add_argument("--require-seats", action="store_true", help="只保留有余票的方案")
+    p.add_argument("--with-price", action="store_true",
+                   help="附带票价（每趟车多一次请求，会明显增加被限流的风险）")
+    p.add_argument("--price-limit", type=int, default=DEFAULT_PRICE_LIMIT,
+                   help=f"--with-price 时最多为多少趟车查票价（默认 {DEFAULT_PRICE_LIMIT}）")
     p.add_argument("--auto-hubs", type=int, default=DEFAULT_AUTO_HUBS,
                    help=f"自动模式最多使用多少个枢纽城市（默认 {DEFAULT_AUTO_HUBS}）")
     p.add_argument("--max-results", type=int, default=10, help="最多输出多少条换乘方案（默认 10）")
