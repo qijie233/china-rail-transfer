@@ -83,9 +83,18 @@ DEFAULT_AUTO_HUBS = 16            # 自动模式枢纽数上限。实测 12306 �
 DEFAULT_CONCURRENCY = 2           # 并发越高越容易触发限流，默认保守
 DEFAULT_CACHE_TTL = 600           # 查询结果磁盘缓存秒数：反复微调参数时不必重复打 12306
 DEFAULT_PRICE_LIMIT = 8           # --with-price 时最多为多少趟车补票价（每趟一次请求）
+CACHE_SCHEMA = 2                  # 缓存里存的是「按下标裁剪过的行」，
+                                  # 一旦下标映射变了，旧缓存就会错位，必须作废重来。
 QUERY_RETRIES = 2
 
-# 返回行（58 列，`|` 分隔）中本脚本用得到的下标，均为 2026-10 实测确认
+# 返回行（58 列，`|` 分隔）中本脚本用得到的下标，均为 2026-10 实测确认。
+#
+# ★ 席别余票的下标曾经整体错位一格（把 idx30 当成硬座，实际是二等座），
+#   导致高铁显示「硬座有票」。现已改用页面渲染出来的 aria-label 做基准逐列校正：
+#   例如 G1224 页面显示「商务座候补 / 一等座1 / 二等座有 / 无座12」，
+#   对应原始字段 idx32=无、idx31=1、idx30=有、idx26=12，一一对上。
+#   普速同样校正过：T132 页面「硬座1 / 无座无」对应 idx29=1、idx26=无。
+IDX_TRAIN_NO = 2          # 车次内部编号（查票价要用）
 IDX_TRAIN_CODE = 3        # 车次
 IDX_START_STATION = 4     # 始发站电报码
 IDX_END_STATION = 5       # 终到站电报码
@@ -94,11 +103,16 @@ IDX_TO = 7                # 下车站电报码
 IDX_DEPART = 8            # 发车时刻
 IDX_ARRIVE = 9            # 到达时刻
 IDX_LISHI = 10            # 历时
+IDX_FROM_NO = 16          # 乘车站序号（查票价要用）
+IDX_TO_NO = 17            # 下车站序号（查票价要用）
+IDX_RW = 23               # 软卧
 IDX_WZ = 26               # 无座
-IDX_YZ = 30               # 硬座 / 二等（普速为硬座）
-IDX_ZE = 31               # 二等座
-IDX_ZY = 32               # 一等座
-IDX_SWZ = 33              # 商务座
+IDX_YW = 28               # 硬卧
+IDX_YZ = 29               # 硬座
+IDX_ZE = 30               # 二等座
+IDX_ZY = 31               # 一等座
+IDX_SWZ = 32              # 商务座
+IDX_SEAT_TYPES = 35       # 席别代码串（查票价要用）
 
 # 席别代码 → 中文名。9/M/O/WZ/1/3/4/6 为 2026-10 实测确认，
 # 其余为 12306 通用代码，遇到不认识的会原样显示成「席别X」而不是瞎猜。
@@ -162,11 +176,13 @@ class Train:
     date: str
     start_code: str = ""
     end_code: str = ""
-    wz: str = ""
-    yz: str = ""
-    ze: str = ""
-    zy: str = ""
-    swz: str = ""
+    wz: str = ""              # 无座
+    rw: str = ""              # 软卧
+    yw: str = ""              # 硬卧
+    yz: str = ""              # 硬座
+    ze: str = ""              # 二等座
+    zy: str = ""              # 一等座
+    swz: str = ""             # 商务座
     # 查票价接口 queryTicketPrice 需要的四个参数（下标均于 2026-10 实测确认）
     train_no: str = ""
     from_station_no: str = ""
@@ -189,15 +205,22 @@ class Train:
         return datetime(d.year, d.month, d.day) + timedelta(minutes=arr_m)
 
     def seats_text(self) -> str:
+        """席别余票的紧凑显示。
+
+        原始值里「无」表示无票（页面上会渲染成「候补」），「有」表示 ≥20 张。
+        顺序按动车组优先（商务/一等/二等），普速席别排在后面。
+        """
         parts = []
-        for label, val in (("商务", self.swz), ("一等", self.zy),
-                           ("二等", self.ze), ("硬座", self.yz), ("无座", self.wz)):
+        for label, val in (("商务", self.swz), ("一等", self.zy), ("二等", self.ze),
+                           ("软卧", self.rw), ("硬卧", self.yw), ("硬座", self.yz),
+                           ("无座", self.wz)):
             if val and val not in ("", "--", "*"):
                 parts.append(f"{label}{val}")
         return " ".join(parts) if parts else "—"
 
     def has_seat(self) -> bool:
-        for val in (self.swz, self.zy, self.ze, self.yz):
+        """是否有可买的座/卧票。无座不算「有票」。"""
+        for val in (self.swz, self.zy, self.ze, self.rw, self.yw, self.yz):
             if val and val not in ("", "--", "*", "无"):
                 return True
         return False
@@ -334,6 +357,16 @@ class StationTable:
         key = (text or "").strip()
         if not key:
             return Resolution(kind="none")
+
+        # 「XX站」是极自然的写法，优先按「明确指定这个车站」处理。
+        # 这一条必须在城市名判定之前，否则当站名与城市名重名时
+        # （如「秦皇岛」既是城市又是车站），主人就永远选不到那个车站本身了。
+        if len(key) > 1 and key.endswith("站"):
+            bare = key[:-1]
+            if bare in self.by_name:
+                st = self.by_name[bare]
+                return Resolution(kind="station", city=st.city,
+                                  stations=[st], matched=key)
 
         if key in self.by_city:
             sts = self.by_city[key]
@@ -728,7 +761,7 @@ _QUERY_JS = """
     const j = await r.json();
     const d = j.data || {};
     const rows = (d.result || []).map(s => s.split("|"));
-    const idx = [3, 4, 5, 6, 7, 8, 9, 10, 26, 30, 31, 32, 33, 2, 16, 17, 35];
+    const idx = [3, 4, 5, 6, 7, 8, 9, 10, 26, 23, 28, 29, 30, 31, 32, 2, 16, 17, 35];
     return JSON.stringify({
       _ok: 1,
       map: d.map || {},
@@ -871,10 +904,11 @@ class QueryCache:
             return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
+            if isinstance(raw, dict) and raw.get("_schema") == CACHE_SCHEMA:
                 now = time.time()
                 self.data = {k: v for k, v in raw.items()
-                             if isinstance(v, dict) and now - v.get("t", 0) < ttl}
+                             if not k.startswith("_") and isinstance(v, dict)
+                             and now - v.get("t", 0) < ttl}
         except (OSError, json.JSONDecodeError):
             self.data = {}
 
@@ -900,7 +934,9 @@ class QueryCache:
         if not self.enabled or not self.dirty:
             return
         try:
-            self.path.write_text(json.dumps(self.data, ensure_ascii=False),
+            payload = {"_schema": CACHE_SCHEMA}
+            payload.update(self.data)
+            self.path.write_text(json.dumps(payload, ensure_ascii=False),
                                  encoding="utf-8")
             self.dirty = False
         except OSError:
@@ -1078,13 +1114,14 @@ def _parse_rows(payload: dict, from_code: str, to_code: str, date_str: str) -> l
             start_code=f[1], end_code=f[2],
             from_code=f[3], to_code=f[4],
             dep=f[5], arr=f[6], lishi=f[7],
-            wz=f[8], yz=f[9], ze=f[10],
-            zy=f[11] if len(f) > 11 else "",
-            swz=f[12] if len(f) > 12 else "",
-            train_no=f[13] if len(f) > 13 else "",
-            from_station_no=f[14] if len(f) > 14 else "",
-            to_station_no=f[15] if len(f) > 15 else "",
-            seat_types=f[16] if len(f) > 16 else "",
+            wz=f[8], rw=f[9], yw=f[10], yz=f[11],
+            ze=f[12] if len(f) > 12 else "",
+            zy=f[13] if len(f) > 13 else "",
+            swz=f[14] if len(f) > 14 else "",
+            train_no=f[15] if len(f) > 15 else "",
+            from_station_no=f[16] if len(f) > 16 else "",
+            to_station_no=f[17] if len(f) > 17 else "",
+            seat_types=f[18] if len(f) > 18 else "",
             date=date_str,
         ))
     return trains
@@ -1318,23 +1355,33 @@ def _pick_hubs_geographically(table: StationTable, hub_names: list[str],
         picked = [n for n, _ in inside] + [n for n, _ in outside]
         return picked[:limit]
 
-    # 长途：把 [lo, hi] 均匀分段、每段取一个枢纽，保证沿线路「铺开」。
-    # 不能只按枢纽表顺序等距抽样 —— 枢纽表本身地域分布不均（江浙沪偏多），
-    # 那样会在长三角堆一堆小站，却漏掉郑州东、武汉、长沙南这类关键节点。
+    # 长途：沿线路「铺开」挑枢纽。但不能只靠均匀分段 —— 分段里若简单取
+    # 编码最小的那个，会把紧邻起讫点的重要枢纽挤掉（实测：镇江→秦皇岛
+    # 会漏掉南京，而南京恰恰是这条线最关键的中转点）。所以分两步：
+    #   1) 先锁定「离两端最近」的若干枢纽，这两簇最重要；
+    #   2) 剩余名额再按编码区间均匀分段，保证沿线路铺开。
     chosen: list[str] = []
-    buckets = max(1, min(limit, len(inside)))
-    if buckets:
+    end_quota = max(1, limit // 4)
+    for name, _ in sorted(hubs, key=lambda x: abs(x[1] - lo))[:end_quota]:
+        if name not in chosen:
+            chosen.append(name)
+    for name, _ in sorted(hubs, key=lambda x: abs(x[1] - hi))[:end_quota]:
+        if name not in chosen:
+            chosen.append(name)
+
+    remaining = max(0, limit - len(chosen))
+    inside_left = [h for h in inside if h[0] not in chosen]
+    if remaining and inside_left:
+        buckets = max(1, min(remaining, len(inside_left)))
         width = span / buckets
         for b in range(buckets):
             seg_lo = lo + b * width
             seg_hi = lo + (b + 1) * width
-            seg = [h for h in inside if seg_lo <= h[1] < seg_hi]
+            seg = [h for h in inside_left if seg_lo <= h[1] < seg_hi]
             if not seg and b == buckets - 1:
-                seg = [h for h in inside if h[1] >= seg_lo]
-            if seg:
-                name = seg[0][0]
-                if name not in chosen:
-                    chosen.append(name)
+                seg = [h for h in inside_left if h[1] >= seg_lo]
+            if seg and seg[0][0] not in chosen:
+                chosen.append(seg[0][0])
 
     # 剩余名额补给两翼最近的枢纽（允许合理绕行）
     for name, _ in outside:
@@ -1562,6 +1609,13 @@ def cmd_stations(args, table: StationTable) -> Outcome:
     for s in sorted(res.stations, key=lambda x: x.name):
         lines.append(f"   {s.name:<8} 电报码 {s.telecode}   拼音 {s.pinyin}")
     first = sorted(res.stations, key=lambda x: x.name)[0]
+    # 站名与城市名重名时，光看列表容易卡死（再输一次还是列表），
+    # 所以额外提示「XX站」和电报码两条出路。
+    same_named = [s for s in res.stations if s.name == res.city]
+    hint = ""
+    if same_named:
+        hint = (f"；若你要的就是与城市同名的「{same_named[0].name}」站，"
+                f"写「{same_named[0].name}站」或电报码 {same_named[0].telecode} 即可")
     out.status = "blocked"
     out.failure_category = FC_AMBIGUOUS
     out.summary = (f"「{query}」对应 {len(res.stations)} 个车站，请选一个具体车站"
@@ -1570,7 +1624,7 @@ def cmd_stations(args, table: StationTable) -> Outcome:
     out.data = {"city": res.city,
                 "stations": [{"name": s.name, "telecode": s.telecode}
                              for s in res.stations]}
-    out.next_action = f"用上面列出的站名重跑，例如 --from {first.name}"
+    out.next_action = f"用上面列出的站名重跑，例如 --from {first.name}{hint}"
     return out
 
 
@@ -1592,11 +1646,16 @@ def _resolve_endpoint(table: StationTable, text: str, label: str,
         for s in sorted(res.stations, key=lambda x: x.name):
             lines.append(f"   {s.name:<8} 电报码 {s.telecode}")
         first = sorted(res.stations, key=lambda x: x.name)[0]
+        same_named = [s for s in res.stations if s.name == res.city]
+        hint = ""
+        if same_named:
+            hint = (f"；若要的就是与城市同名的「{same_named[0].name}」站，"
+                    f"写「{same_named[0].name}站」或电报码 {same_named[0].telecode}")
         o = Outcome(status="blocked", failure_category=FC_AMBIGUOUS,
                     summary=f"{label}「{text}」有 {len(res.stations)} 个候选车站，需要你先选定。",
                     evidence=lines,
                     next_action=(f"用上面某个站名重跑（如 {first.name}），"
-                                 f"或加 --all-stations 一次性搜索全部 {len(res.stations)} 个站"))
+                                 f"或加 --all-stations 一次性搜索全部 {len(res.stations)} 个站{hint}"))
         return [], o
 
     return [s.telecode for s in res.stations], None
