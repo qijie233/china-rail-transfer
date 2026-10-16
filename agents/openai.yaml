@@ -1,0 +1,4 @@
+interface:
+  display_name: "火车票中转查询"
+  short_description: "查询火车票中转换乘方案，强制最小换乘缓冲并计入同城异站通勤时间。"
+  default_prompt: "使用 rail-transfer skill，确认出发站、到达站与乘车日期，必要时先列出候选车站，指定或自动挑选中转枢纽，查询并按最小换乘缓冲与同城异站通勤时间筛选可行换乘方案，输出结果并给出下一步建议。"
