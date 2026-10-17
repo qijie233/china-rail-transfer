@@ -393,12 +393,37 @@ def _fmt_minutes(total: int) -> str:
     return f"{m}分"
 
 
-def _fmt_price(prices: dict) -> str:
-    """票价的紧凑渲染；按价格从低到高，最多三个席别。"""
+def _leg_price(prices: dict | None,
+               seat_classes: set[str] | None = None) -> tuple[str, str]:
+    """返回 (席别名, 价格字符串)。
+
+    指定席别时取这些席别里的最低价；不指定时取全席别最低价。
+    没有任何可用价格时返回 ("", "")。
+    """
     if not prices:
+        return "", ""
+    items = list(prices.items())
+    if seat_classes:
+        items = [(k, v) for k, v in items if k in seat_classes]
+    if not items:
+        return "", ""
+    seat, value = min(items, key=lambda kv: _price_value(kv[1]))
+    if _price_value(value) >= 1e9:
+        return "", ""
+    return seat, value
+
+
+def _fmt_price(prices: dict, seat_classes: set[str] | None = None) -> str:
+    """票价的紧凑渲染。
+
+    指定席别时只显示该席别的最低价；不指定时显示全席别最低价及席别名。
+    """
+    seat, value = _leg_price(prices, seat_classes)
+    if not value:
         return ""
-    items = sorted(prices.items(), key=lambda kv: _price_value(kv[1]))
-    return "   票价 " + " ".join(f"{name}{val}" for name, val in items[:3])
+    if seat_classes:
+        return f"   {seat} {value}"
+    return f"   最低 {value}（{seat}）"
 
 
 def _now_minutes() -> int:
@@ -1959,6 +1984,7 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
                  f" · 排序 {res.get('sort', 'total')}")
 
     filters = res.get("filters") or {}
+    seat_classes = set(filters.get("seat_classes") or [])
     bits: list[str] = []
     if filters.get("depart_after"):
         bits.append(f"发车 ≥{filters['depart_after']}")
@@ -1993,7 +2019,7 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
         for t in directs[:8]:
             lines.append(f"   {t['code']:<7} {t['from_name']} {t['dep']} → "
                          f"{t['to_name']} {t['arr']}  历时 {t['lishi']}  余票 {t['seats']}"
-                         f"{_fmt_price(t.get('prices') or {})}")
+                         f"{_fmt_price(t.get('prices') or {}, seat_classes)}")
         if len(directs) > 8:
             lines.append(f"   …… 另有 {len(directs) - 8} 趟直达车")
     lines.append("")
@@ -2005,8 +2031,8 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
     else:
         for i, p in enumerate(plans, 1):
             total_txt = f"总耗时 {p['total']}"
-            if p.get("min_total"):
-                total_txt += f"   最低合计 {p['min_total']}"
+            if p.get("total_price"):
+                total_txt += f"   合计 {p['total_price']}"
             lines.append(f"{i:>2}. {total_txt}   换乘 {len(p.get('transfers') or [])} 次")
             legs = p.get("legs") or []
             transfers = p.get("transfers") or []
@@ -2014,7 +2040,7 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
                 lines.append(f"    {j}) {leg['code']:<7} {leg['from_name']} "
                              f"{leg['dep']} → {leg['to_name']} {leg['arr']}"
                              f"   余票 {leg['seats']}"
-                             f"{_fmt_price(leg.get('prices') or {})}")
+                             f"{_fmt_price(leg.get('prices') or {}, seat_classes)}")
                 if j <= len(transfers):
                     tr = transfers[j - 1]
                     if tr["same_station"]:
@@ -2029,6 +2055,11 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
                     lines.append(f"       ↓ 缓冲 {tr['gap_min']} 分钟"
                                  f"（要求 ≥{tr['required_min']}）{ok}"
                                  f"   换乘 {hub_txt}{extra}")
+            detail = p.get("total_price_detail") or []
+            if detail:
+                parts = " + ".join(f"{d['seat']} {d['price']}" for d in detail)
+                label = "双程合计" if len(legs) == 2 else "全程合计"
+                lines.append(f"    ── {label} {p['total_price']}（{parts}）")
 
     near = res.get("near_miss_plans") or []
     if near:
@@ -2041,15 +2072,22 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
             lines.append(f"{i:>2}. 总耗时 {p['total']}   换乘 "
                          f"{len(p.get('transfers') or [])} 次   最紧处差 {short} 分钟")
             transfers = p.get("transfers") or []
-            for j, leg in enumerate(p.get("legs") or [], 1):
+            legs = p.get("legs") or []
+            for j, leg in enumerate(legs, 1):
                 lines.append(f"    {j}) {leg['code']:<7} {leg['from_name']} "
                              f"{leg['dep']} → {leg['to_name']} {leg['arr']}"
-                             f"   余票 {leg['seats']}")
+                             f"   余票 {leg['seats']}"
+                             f"{_fmt_price(leg.get('prices') or {}, seat_classes)}")
                 if j <= len(transfers):
                     tr = transfers[j - 1]
                     ok = "✓" if tr["gap_min"] >= tr["required_min"] else "✗"
                     lines.append(f"       ↓ 缓冲 {tr['gap_min']} 分钟"
                                  f"（要求 ≥{tr['required_min']}）{ok}")
+            detail = p.get("total_price_detail") or []
+            if detail:
+                parts = " + ".join(f"{d['seat']} {d['price']}" for d in detail)
+                label = "双程合计" if len(legs) == 2 else "全程合计"
+                lines.append(f"    ── {label} {p['total_price']}（{parts}）")
     lines.append("")
 
     if res.get("warnings"):
@@ -2077,8 +2115,8 @@ def render_dates_text(res: dict, table: StationTable, verbose: bool = False) -> 
         if best:
             trip = " → ".join(f"{leg['code']} {leg['dep']}" for leg in best["legs"])
             detail = f"{trip}（{best['total']}）"
-            if best.get("min_total"):
-                detail += f" {best['min_total']}"
+            if best.get("total_price"):
+                detail += f" {best['total_price']}"
         elif item["direct"]:
             t = item["direct"][0]
             detail = f"直达 {t['code']} {t['dep']}→{t['arr']}"
@@ -2563,7 +2601,8 @@ def _execute_query(args, table: StationTable, setup: dict, date_str: str,
         "price_calls": price_calls,
         "warnings": warnings,
         "errors": engine.errors,
-        "direct": [_train_json(t, table, not args.no_standing) for t in direct_trains[:40]],
+        "direct": [_train_json(t, table, not args.no_standing, seat_classes)
+                   for t in direct_trains[:40]],
         "plans": [_plan_json(p, table, seat_classes, not args.no_standing) for p in plans],
         "near_miss_plans": [_plan_json(p, table, seat_classes, not args.no_standing)
                             for p in near_plans],
@@ -2917,16 +2956,31 @@ def cmd_watch(args, table: StationTable) -> Outcome:
     return out
 
 
+def _price_detail(p: Plan,
+                  seat_classes: set[str] | None = None) -> list[dict[str, str]]:
+    """各段选定席别的价格明细；任意一段没有价格时返回空列表。"""
+    detail: list[dict[str, str]] = []
+    for leg in p.legs:
+        seat, value = _leg_price(leg.prices or {}, seat_classes)
+        if not value:
+            return []
+        detail.append({"code": leg.code, "seat": seat, "price": value})
+    return detail
+
+
 def _min_total_text(p: Plan, seat_classes: set[str] | None = None) -> str:
-    """各段指定席别最低价之和；可能混席别，所以标注为「最低合计」。"""
-    total = p.cheapest_price(seat_classes)
-    if total >= 1e9:
+    """各段选定席别价格之和；任意一段缺价时返回空字符串。"""
+    detail = _price_detail(p, seat_classes)
+    if not detail:
         return ""
+    total = sum(_price_value(item["price"]) for item in detail)
     return f"¥{total:.1f}"
 
 
-def _train_json(t: Train, table: StationTable, show_standing: bool = True) -> dict:
+def _train_json(t: Train, table: StationTable, show_standing: bool = True,
+                seat_classes: set[str] | None = None) -> dict:
     dep_dt, arr_dt = t.dep_dt(), t.arr_dt()
+    seat, price = _leg_price(t.prices or {}, seat_classes)
     return {
         "code": t.code,
         "from_name": table.name_of(t.from_code),
@@ -2939,13 +2993,15 @@ def _train_json(t: Train, table: StationTable, show_standing: bool = True) -> di
         "seats": t.seats_text(show_standing),
         "has_seat": t.has_seat(),
         "prices": dict(t.prices) if t.prices else {},
+        "selected_seat": seat,
+        "selected_price": price,
     }
 
 
 def _plan_json(p: Plan, table: StationTable,
                seat_classes: set[str] | None = None,
                show_standing: bool = True) -> dict:
-    legs = [_train_json(leg, table, show_standing) for leg in p.legs]
+    legs = [_train_json(leg, table, show_standing, seat_classes) for leg in p.legs]
     transfers = [{
         "hub_city": tr.hub_city,
         "hub_arrive": table.name_of(tr.arrive_code),
@@ -2958,12 +3014,17 @@ def _plan_json(p: Plan, table: StationTable,
         "near_miss": tr.near_miss,
     } for tr in p.transfers]
     first = transfers[0] if transfers else {}
+    total_price = _min_total_text(p, seat_classes)
     return {
         "legs": legs,
         "transfers": transfers,
         "total": _fmt_minutes(p.total_min()),
         "total_min": p.total_min(),
-        "min_total": _min_total_text(p, seat_classes),
+        "total_price": total_price,
+        "total_price_detail": _price_detail(p, seat_classes),
+        "total_price_note": ("指定席别" if seat_classes
+                             else "各段最低席别（可能混席别）"),
+        "min_total": total_price,
         "near_miss": p.near_miss,
         # 兼容旧版两段方案的字段
         "hub_city": first.get("hub_city", ""),

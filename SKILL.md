@@ -78,8 +78,9 @@ description: 当需要查询火车票中转换乘方案，调用自带脚本按�
     有票判定要求换乘方案的**每一段**都有座/卧票。
 13. 需要票价时加 `--with-price`。**票价是「每趟车一次额外请求」**，
     会明显增加被限流的风险，因此默认关闭、并受 `--price-limit`（默认 8）约束；
-    建议与 `--via` 一起用，把总请求量控制在十次上下。未指定 `--seat-class` 时，
-    「最低合计」可能混席别，只作比价参考。
+    建议与 `--via` 一起用，把总请求量控制在十次上下。
+    指定 `--seat-class` 时，每程显示该席别价格并给出「双程合计 / 全程合计」；
+    未指定时每程显示全席别最低价，合计可能混席别，只作比价参考。
 
 ## 失败分流
 
@@ -111,12 +112,15 @@ description: 当需要查询火车票中转换乘方案，调用自带脚本按�
 - 默认输出人读报告：直达车次列表 + 换乘方案列表（两段或三段），每条方案逐段标注
   换乘站、同站/异站、站间通勤时间、缓冲余量与是否满足要求；满足要求的用 `✓`。
   `--near-miss` 的方案单独放在「差一点点的方案」区块，用 `✗` 标注。
-  多日扫描输出每天一行的汇总；加 `--with-price` 时每段追加票价与最低合计。
+  多日扫描输出每天一行的汇总；加 `--with-price` 时每程追加选定席别价格，
+  并在方案末尾输出「双程合计 / 全程合计」及每程明细。
 - `--format json` 输出结构化结果，字段对齐 `shared/contracts.md` 的
   Command Outcome Schema：`status` / `summary` / `evidence` / `next_action` /
   `failure_category` / `data`。
 - `data` 里：每条方案有 `legs`（逐段车次）与 `transfers`（逐换乘点），
   同时保留旧版 `leg1` / `leg2` / `hub_arrive` 等兼容字段；
+  加 `--with-price` 后每段有 `selected_seat` / `selected_price`，
+  方案有 `total_price` / `total_price_detail` / `total_price_note`；
   `near_miss_plans` 与 `plans` 分开；`budget` 记录请求预算用量；
   多日扫描用 `multi: true` + `results: [每日结果]`。
 - 监控模式的 JSON 输出是**每轮一行 JSONL**（`time` / `cycle` / `available` / `new`），

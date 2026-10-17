@@ -31,13 +31,22 @@ def test_plan_json_keeps_legacy_fields(table, train_factory):
     assert pj["hub_arrive"] == "乙站"
     assert pj["gap_min"] == 30 and pj["required_min"] == 16
     assert pj["min_total"] == "¥180.0"
+    assert pj["total_price"] == "¥180.0"
+    assert pj["total_price_note"] == "指定席别"
+    assert pj["total_price_detail"] == [
+        {"code": "G1", "seat": "二等座", "price": "¥100.0"},
+        {"code": "G2", "seat": "二等座", "price": "¥80.0"},
+    ]
+    assert pj["legs"][0]["selected_seat"] == "二等座"
+    assert pj["legs"][0]["selected_price"] == "¥100.0"
     assert pj["near_miss"] is False
 
 
 def test_render_text_shows_buffer_and_price(table, train_factory):
     text = rt.render_text(_res(_plan(train_factory), table, {"二等座"}), table)
     assert "缓冲 30 分钟（要求 ≥16）✓" in text
-    assert "最低合计 ¥180.0" in text
+    assert "合计 ¥180.0" in text
+    assert "双程合计 ¥180.0（二等座 ¥100.0 + 二等座 ¥80.0）" in text
 
 
 def test_render_text_shows_near_miss(table, train_factory):

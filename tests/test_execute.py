@@ -46,6 +46,9 @@ def test_execute_query_with_price(args_factory, table, disabled_cache,
     session = fake_session_cls(_simple_rows(row_factory), prices)
     res, _ = _run(args, table, session, disabled_cache)
     assert res["plans"][0]["min_total"] == "¥180.0"
+    assert res["plans"][0]["total_price"] == "¥180.0"
+    assert res["plans"][0]["total_price_detail"][1]["price"] == "¥80.0"
+    assert res["plans"][0]["legs"][0]["selected_price"] == "¥100.0"
     assert res["plans"][0]["legs"][0]["prices"] == {"二等座": "¥100.0"}
     assert res["price_calls"] == 2
 
@@ -174,4 +177,4 @@ def test_price_disk_cache_avoids_repeat(args_factory, table, row_factory,
     second, _ = rt._execute_query(args, table, setup, args.date, session, cache,
                                   rt.RequestBudget(0))
     assert len(session.price_queries) == sent_after_first
-    assert second["plans"][0]["min_total"] == first["plans"][0]["min_total"]
+    assert second["plans"][0]["total_price"] == first["plans"][0]["total_price"]

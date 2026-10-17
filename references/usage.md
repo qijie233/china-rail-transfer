@@ -53,7 +53,7 @@ python scripts/rail_transfer.py --from 句容西 --to 苏州 --date 2026-10-22 \
 
 # 带上票价（见第 5 节，注意请求量）
 python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
-    --via 上海 --with-price
+    --via 上海 --seat-class 二等座 --with-price
 ```
 
 ### 3.1 时间窗、排序与席别
@@ -179,22 +179,22 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
 
 ```bash
 python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
-    --via 上海 --with-price
+    --via 上海 --seat-class 二等座 --with-price
 ```
 
-输出会在每段车次后面追加票价，并在方案标题上给出**最低合计**：
+输出会逐程显示选定席别的价格，并在方案末尾给出**双程合计**：
 
 ```
- 1. 总耗时 2小时35分   最低合计 ¥145.0   换乘 1 次
-    1) D3201   太仓南 07:43 → 上海虹桥 08:09   余票 一等有 二等有 无座有
-       票价 无座¥17.0 二等座¥17.0 一等座¥27.0
+ 1. 总耗时 2小时35分   合计 ¥145.0   换乘 1 次
+    1) D3201   太仓南 07:43 → 上海虹桥 08:09   余票 一等有 二等有 无座有   二等座 ¥17.0
        ↓ 缓冲 25 分钟（要求 ≥20）✓   换乘 上海虹桥（同站）
-    2) G3272   上海虹桥 08:34 → 句容 10:18   余票 商务3 一等13 二等有 无座有
-       票价 无座¥128.0 二等座¥128.0 一等座¥204.0
+    2) G3272   上海虹桥 08:34 → 句容 10:18   余票 商务3 一等13 二等有 无座有   二等座 ¥128.0
+    ── 双程合计 ¥145.0（二等座 ¥17.0 + 二等座 ¥128.0）
 ```
 
 这里的「要求 ≥20」来自上海虹桥的站点缓冲（`transfer-buffers.json`），
-不是全局的 16 分钟。
+不是全局的 16 分钟。未指定 `--seat-class` 时，每程显示全席别最低价并标出席别名
+（如 `最低 ¥17.0（无座）`），合计可能混席别。
 
 ### ⚠ 请求量警告
 
@@ -207,11 +207,15 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
   磁盘票价缓存默认 **24 小时**（`--price-cache-ttl`），因为公布票价基本稳定。
 - 建议配合 `--via` 使用：基础查询本来就只要 2~4 次，加票价总共约 10 次上下。
 
-### 「最低合计」怎么算
+### 「双程 / 全程合计」怎么算
 
-把各段最便宜的席别相加。**不指定 `--seat-class` 时可能混席别**
-（比如一段二等座 + 一段硬座），所以只作比价参考；
-加了 `--seat-class` 之后，只统计指定席别，合计才真正可比。
+- 指定 `--seat-class`：每程取该席别的最低价，合计 = 各程相加；
+  输出末尾会列出 `二等座 ¥17.0 + 二等座 ¥128.0` 这样的明细。
+- 未指定席别：每程取全席别最低价，合计可能混席别（比如一段二等座 + 一段硬座），
+  只作比价参考。
+- 两段显示「双程合计」，三段显示「全程合计」。
+- JSON 里对应字段是 `total_price`、`total_price_detail`、`total_price_note`；
+  每段还有 `selected_seat` / `selected_price`。`min_total` 保留为兼容字段。
 
 ### 席别代码
 
@@ -334,6 +338,7 @@ python scripts/rail_transfer.py ... --format json
         {"code": "D3201", "from_name": "太仓南", "to_name": "上海虹桥",
          "dep": "07:43", "arr": "08:09", "lishi": "00:26",
          "seats": "二等16 硬座有", "has_seat": true,
+         "selected_seat": "二等座", "selected_price": "¥17.0",
          "dep_datetime": "2026-10-18T07:43:00",
          "arr_datetime": "2026-10-18T08:09:00",
          "prices": {"无座": "¥17.0", "二等座": "¥17.0", "一等座": "¥27.0"}},
@@ -345,7 +350,14 @@ python scripts/rail_transfer.py ... --format json
         "interstation_min": 0, "interstation_estimated": false,
         "near_miss": false
       }],
-      "total": "2小时35分", "total_min": 155, "min_total": "¥145.0",
+      "total": "2小时35分", "total_min": 155,
+      "total_price": "¥145.0",
+      "total_price_detail": [
+        {"code": "D3201", "seat": "二等座", "price": "¥17.0"},
+        {"code": "G3272", "seat": "二等座", "price": "¥128.0"}
+      ],
+      "total_price_note": "指定席别",
+      "min_total": "¥145.0",
       "near_miss": false,
       "hub_city": "上海", "hub_arrive": "上海虹桥", "hub_depart": "上海虹桥",
       "same_station": true, "gap_min": 25, "required_min": 16,
@@ -367,7 +379,8 @@ python scripts/rail_transfer.py ... --format json
 - 监控模式的 JSON 是每轮一行 JSONL（`time` / `cycle` / `available` / `new`），
   不额外输出汇总对象。
 
-未加 `--with-price` 时，`prices` 为空对象 `{}`、`min_total` 为空字符串。
+未加 `--with-price` 时，`prices` 为空对象 `{}`、`total_price` / `min_total`
+为空字符串、`total_price_detail` 为空数组。
 
 退出码：`success` / `partial_success` → 0，`blocked` → 2，`failure` → 1。
 
@@ -385,8 +398,9 @@ A：优先看报告里的 `⚠ 提示`。若是限流，稍后重试或改用 `-
 A：`queryTicketPrice` 返回的是该区间该席别的公布票价。
 若有浮动票价（部分线路执行市场化定价），以 12306 下单页为准。
 
-**Q：「最低合计」可以直接当总价看吗？**
-A：只能当**比价参考**。它是两段各自最低席别相加，可能混席别。
+**Q：「双程合计」可以直接当总价看吗？**
+A：指定 `--seat-class` 时，它就是该席别各程价格之和，比较可靠；
+未指定席别时，它是各程最低席别相加，可能混席别，只能当比价参考。
 
 **Q：余票显示为空？**
 A：普速车的余票字段与动车组不同，部分车次只给「有/无」；跨局列车也可能不返回
