@@ -28,6 +28,9 @@ rail-transfer/
 Thumbs.db
 desktop.ini
 
+.pytest_cache/
+.ruff_cache/
+
 # 临时文件
 *.log
 *.tmp

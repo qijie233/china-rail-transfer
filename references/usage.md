@@ -56,17 +56,117 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
     --via 上海 --with-price
 ```
 
+### 3.1 时间窗、排序与席别
+
+```bash
+# 18 点前到，只要二等座，按到达时刻排序
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --arrive-before 18:00 --seat-class 二等座 --sort arrive
+
+# 换乘最多等 90 分钟，卧铺优先
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --max-wait 90 --seat-class 卧铺
+```
+
+- 发车时间窗看第一程，到达时间窗看最后一程；跨天到达按真实日期比较（次日 01:00 不会被当成当天 22:00 前）。
+- `--sort` 取值：`total`（默认）/ `arrive` / `depart` / `gap` / `price`。
+  `price` 需要 `--with-price`，否则没有票价可用，会退化为按总耗时排序。
+- `--seat-class` 支持 `商务座、一等座、二等座、软卧、硬卧、硬座、无座`，
+  以及别名 `卧铺`（软卧+硬卧）、`坐票`/`座位`（各类坐席）。
+  指定后每一段都必须有该席别余票。
+- `--no-standing` 不把无座当作有票，并从输出里隐藏无座。
+- 查询当天时，默认隐藏已经发车的车次；要看全量加 `--show-departed`。
+
+### 3.2 近似方案与排除中转
+
+```bash
+# 额外列出只差 5 分钟以内的方案（单独成块，不进主列表）
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --via 南京 --near-miss 5
+
+# 别走北京
+python scripts/rail_transfer.py --from 上海 --to 哈尔滨 --date 2026-10-18 \
+    --avoid 北京
+```
+
+- `--near-miss` 的 JSON 字段是 `near_miss_plans`，与 `plans` 分开；
+  每个换乘点还有一个 `near_miss` 布尔值。
+- `--avoid` 对自动枢纽和 `--via` 都生效，不增加请求。
+
+### 3.3 多日扫描
+
+```bash
+python scripts/rail_transfer.py --from 太仓南 --to 句容 \
+    --dates 2026-10-18..2026-10-20 --via 上海
+```
+
+- 支持 `A..B` 范围或逗号分隔的日期；`--max-days`（默认 7）限制天数。
+- 每天独立查询，请求量按天数线性增长；`--max-queries` 是总预算。
+- 文本输出每天一行汇总；JSON 用 `multi: true` + `results` 保存每天完整结果。
+- `--dates` 与 `--watch` 互斥。
+
+### 3.4 三段换乘
+
+```bash
+python scripts/rail_transfer.py --from 某小站 --to 另一小站 --date 2026-10-18 \
+    --legs 3 --via 南京南,徐州东
+```
+
+- 只有显式 `--via` 链才支持三段，且必须恰好两个中转站。
+- 每段独立检查缓冲、站点缓冲与异站通勤；加 `--allow-overnight` 后后两段会查次日。
+- 不做自动三段：请求量和组合数都会爆炸，容易触发限流。
+
+### 3.5 余票监控
+
+```bash
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --via 上海 --watch --interval 180
+
+# 只盯指定车次，跑 10 轮后结束
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --via 上海 --watch --watch-trains D3201,G3272 --watch-cycles 10
+```
+
+- 每轮绕过余票缓存，但保留 24 小时票价缓存。
+- 最小间隔 60 秒；默认 180 秒。`--max-queries` 是**每轮**预算。
+- 有票判定：直达车看该车次；换乘方案要求每一段都有座/卧票。
+- 有票时发桌面通知（Windows/macOS/Linux 尽力而为），同时打印 `🔔` 行。
+- `--format json` 时每轮输出一行 JSONL；Ctrl+C 停止。
+
+### 3.6 请求预算
+
+```bash
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --via 上海 --max-queries 40
+```
+
+超过预算会立即停止未完成查询，结果标记 `partial_success`，
+报告里写「请求预算耗尽」。用 `--via` + 小预算可以稳定控制请求量。
+
 ## 4. 换乘可行性怎么判
 
 这是本工具与官方中转最大的差别，规则是硬性的：
 
 ```
-同站换乘：  第二程发车 − 第一程到达  ≥  min_transfer
-异站换乘：  第二程发车 − 第一程到达  ≥  站间通勤时间 + min_transfer + cross_station_buffer
+同站换乘：  第二程发车 − 第一程到达  ≥  max(min_transfer, 站点缓冲)
+异站换乘：  第二程发车 − 第一程到达  ≥  站间通勤 + max(min_transfer, 站点缓冲) + cross_station_buffer
 ```
 
-- `--min-transfer`：默认 **16 分钟**。
+- `--min-transfer`：默认 **16 分钟**。**查询前应先确定这个值**：
+  agent 会在拿到出发/到达站后询问主人；命令行人工使用可加 `--ask-transfer`：
+
+  ```bash
+  python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+      --via 上海 --ask-transfer
+  ```
+
+  脚本会提示「两趟车之间至少留多少分钟？」，直接回车使用 16 分钟；
+  也可以用 `--min-transfer 25 --ask-transfer` 把 25 作为提示里的默认值。
+- **站点缓冲**来自 [transfer-buffers.json](transfer-buffers.json)：大枢纽 18~20 分钟，
+  查不到的车站不额外加严，仍按 `--min-transfer`（默认 16 分钟）。最终要求和 `--min-transfer` 取较大值；
+  `--ignore-station-buffers` 可完全忽略这份表。
 - `--cross-station-buffer`：默认 **5 分钟**，给找站、安检排队留的额外余量。
+  它和 `--min-transfer` 一样可以手动改；`--ask-transfer` 的提示里会说明这一点。
 - 站间通勤时间来自 [interchange-times.json](interchange-times.json)，
   查不到的站对用 `_default`（60 分钟）**保守估计，并在输出里标注「估算」**。
 - `--no-cross-station`：完全不考虑同城异站换乘。
@@ -85,13 +185,16 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
 输出会在每段车次后面追加票价，并在方案标题上给出**最低合计**：
 
 ```
- 1. 总耗时 2小时35分   最低合计 ¥145.0   换乘 上海虹桥（同站）
-    1) D3201   太仓南 07:43 → 上海虹桥 08:09   余票 二等16
+ 1. 总耗时 2小时35分   最低合计 ¥145.0   换乘 1 次
+    1) D3201   太仓南 07:43 → 上海虹桥 08:09   余票 一等有 二等有 无座有
        票价 无座¥17.0 二等座¥17.0 一等座¥27.0
-       ↓ 缓冲 25 分钟（要求 ≥16）✓
-    2) G3272   上海虹桥 08:34 → 句容 10:18   余票 一等1 二等无
+       ↓ 缓冲 25 分钟（要求 ≥20）✓   换乘 上海虹桥（同站）
+    2) G3272   上海虹桥 08:34 → 句容 10:18   余票 商务3 一等13 二等有 无座有
        票价 无座¥128.0 二等座¥128.0 一等座¥204.0
 ```
+
+这里的「要求 ≥20」来自上海虹桥的站点缓冲（`transfer-buffers.json`），
+不是全局的 16 分钟。
 
 ### ⚠ 请求量警告
 
@@ -100,13 +203,15 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
 
 - `--with-price` **默认关闭**，需要才加。
 - `--price-limit`（默认 8）限制最多为多少趟车查票价，实际请求量上限约 `2 × price-limit`。
-- 同一「车次 + 区间 + 日期」只查一次，内存 + 磁盘双层缓存。
+- 同一「车次 + 区间 + 日期」只查一次，内存 + 磁盘双层缓存；
+  磁盘票价缓存默认 **24 小时**（`--price-cache-ttl`），因为公布票价基本稳定。
 - 建议配合 `--via` 使用：基础查询本来就只要 2~4 次，加票价总共约 10 次上下。
 
 ### 「最低合计」怎么算
 
-把两段各自最便宜的席别相加。**注意它可能混席别**（比如一段二等座 + 一段硬座），
-所以只作比价参考，不代表能买到同一等级的组合。要精确组合请自己按席别加。
+把各段最便宜的席别相加。**不指定 `--seat-class` 时可能混席别**
+（比如一段二等座 + 一段硬座），所以只作比价参考；
+加了 `--seat-class` 之后，只统计指定席别，合计才真正可比。
 
 ### 席别代码
 
@@ -159,8 +264,11 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
 3. 调小 `--auto-hubs`（如 `--auto-hubs 8`）。
 4. 谨慎使用 `--with-price`，必要时调小 `--price-limit`。
 5. 脚本缓存在反复微调参数时能省掉重复请求（含票价）。
+6. 用 `--max-queries N` 给单次命令钉死请求上限；超出会停止并标记 `partial_success`。
+7. 余票监控每轮都会绕过余票缓存，但 `--interval` 最小 60 秒，且建议 3 分钟以上。
 
-余票与票价都是动态数据，缓存 TTL 只有 10 分钟；要看最新的请加 `--no-cache`。
+余票缓存默认 10 分钟；票价缓存默认 24 小时（公布票价基本稳定）。
+要看最新余票加 `--no-cache`；要最新票价再设 `--price-cache-ttl 0`。
 
 ## 8. 已实测确认的接口事实（改动代码前务必先读）
 
@@ -217,22 +325,47 @@ python scripts/rail_transfer.py ... --format json
     "min_transfer": 16, "cross_station_buffer": 5,
     "queries": 9, "price_calls": 6,
     "warnings": [], "errors": [],
+    "sort": "total", "chain": false,
+    "filters": {"seat_classes": [], "near_miss": 0, "max_wait": null},
+    "budget": {"limit": 0, "used": 9, "exhausted": false},
     "direct": [],
     "plans": [{
+      "legs": [
+        {"code": "D3201", "from_name": "太仓南", "to_name": "上海虹桥",
+         "dep": "07:43", "arr": "08:09", "lishi": "00:26",
+         "seats": "二等16 硬座有", "has_seat": true,
+         "dep_datetime": "2026-10-18T07:43:00",
+         "arr_datetime": "2026-10-18T08:09:00",
+         "prices": {"无座": "¥17.0", "二等座": "¥17.0", "一等座": "¥27.0"}},
+        {"code": "G3272", "from_name": "上海虹桥", "to_name": "句容", "...": "..."}
+      ],
+      "transfers": [{
+        "hub_city": "上海", "hub_arrive": "上海虹桥", "hub_depart": "上海虹桥",
+        "same_station": true, "gap_min": 25, "required_min": 16,
+        "interstation_min": 0, "interstation_estimated": false,
+        "near_miss": false
+      }],
+      "total": "2小时35分", "total_min": 155, "min_total": "¥145.0",
+      "near_miss": false,
       "hub_city": "上海", "hub_arrive": "上海虹桥", "hub_depart": "上海虹桥",
       "same_station": true, "gap_min": 25, "required_min": 16,
-      "interstation_min": 0, "interstation_estimated": false,
-      "total": "2小时35分", "total_min": 155, "min_total": "¥145.0",
-      "leg1": {
-        "code": "D3201", "from_name": "太仓南", "to_name": "上海虹桥",
-        "dep": "07:43", "arr": "08:09", "lishi": "00:26", "seats": "二等16 硬座有",
-        "prices": {"无座": "¥17.0", "二等座": "¥17.0", "一等座": "¥27.0"}
-      },
-      "leg2": { }
-    }]
+      "leg1": {"code": "D3201", "...": "..."},
+      "leg2": {"code": "G3272", "...": "..."}
+    }],
+    "near_miss_plans": []
   }
 }
 ```
+
+要点：
+
+- 每条方案用 `legs`（逐段）与 `transfers`（逐换乘点）描述，两段和三段一致；
+  同时保留旧版 `leg1` / `leg2` / `hub_arrive` / `gap_min` 等字段，方便旧调用方。
+- `near_miss_plans` 与 `plans` 分开，不会混在一起。
+- `budget` 记录请求预算上限、实际用量与是否耗尽。
+- 多日扫描的 `data` 是 `multi: true` + `results: [每日结果]` + `dates`。
+- 监控模式的 JSON 是每轮一行 JSONL（`time` / `cycle` / `available` / `new`），
+  不额外输出汇总对象。
 
 未加 `--with-price` 时，`prices` 为空对象 `{}`、`min_total` 为空字符串。
 
@@ -258,6 +391,18 @@ A：只能当**比价参考**。它是两段各自最低席别相加，可能混
 **Q：余票显示为空？**
 A：普速车的余票字段与动车组不同，部分车次只给「有/无」；跨局列车也可能不返回
 具体张数。`--require-seats` 只保留确认有余票的方案。
+
+**Q：`--watch` 会不会被限流？**
+A：设计上尽量保守（最小 60 秒、每轮预算、只查必要城市对），但长时间高频监控
+仍可能触发限流。建议 3 分钟以上一轮；用 `--watch-trains` 缩小范围，
+或用 `--via` 固定中转站。
+
+**Q：`--near-miss` 会不会把不安全方案混进结果？**
+A：不会。近似方案单独放在「差一点点的方案」区块，JSON 里也是独立的
+`near_miss_plans` 字段；主方案仍然严格满足缓冲要求。
+
+**Q：三段换乘能自动挑中转站吗？**
+A：不能。只支持显式 `--via A,B` 链——自动三段会让请求量和组合数一起爆炸。
 
 **Q：能不能顺便帮我下单/抢票？**
 A：不能。本 skill 只做查询与方案筛选，不涉及下单、支付、占座。

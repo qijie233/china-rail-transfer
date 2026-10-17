@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "china-rail-transfer"
+version = "0.4.0"
+description = "12306 中转换乘查询：强制最小换乘缓冲、同城异站通勤、余票监控"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "祈杰喵" }]
+dependencies = ["websocket-client>=1.6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+rail-transfer = "rail_transfer_cli:main"
+
+[tool.setuptools]
+py-modules = ["rail_transfer_cli"]
+packages = ["rail_transfer_core"]
+
+[tool.setuptools.package-dir]
+rail_transfer_core = "scripts"
+
+[tool.setuptools.data-files]
+"share/rail-transfer/references" = [
+  "references/hubs.json",
+  "references/interchange-times.json",
+  "references/transfer-buffers.json",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E9", "F"]

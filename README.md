@@ -23,7 +23,12 @@ you cannot physically make. Ships as an agent skill with a standalone CLI. Docs 
 - [特性](#特性)
 - [安装](#安装)
 - [快速开始](#快速开始)
+- [使用指南](#使用指南)
 - [主要参数](#主要参数)
+- [时间窗、排序与席别](#时间窗排序与席别)
+- [余票监控（--watch）](#余票监控--watch)
+- [多日扫描与三段换乘](#多日扫描与三段换乘)
+- [请求预算、缓存与站点缓冲](#请求预算缓存与站点缓冲)
 - [换乘可行性怎么判](#换乘可行性怎么判)
 - [工作原理](#工作原理)
 - [⚠️ 限流：使用前请务必了解](#️-限流使用前请务必了解)
@@ -31,6 +36,7 @@ you cannot physically make. Ships as an agent skill with a standalone CLI. Docs 
 - [常见问题](#常见问题)
 - [已知限制](#已知限制)
 - [免责声明](#免责声明)
+- [测试与开发](#测试与开发)
 - [贡献](#贡献)
 
 ---
@@ -67,22 +73,45 @@ you cannot physically make. Ships as an agent skill with a standalone CLI. Docs 
 
 ## 特性
 
-- **强制最小换乘缓冲**（默认 16 分钟，可调）
+- **强制最小换乘缓冲**（主动询问主人，默认 16 分钟），并按车站再加严（大枢纽默认 18~20 分钟）
 - **同城异站通勤时间**：内置 41 个主要城市的站间通勤表；表里没有的站对用保守默认值，
   并**明确标注「估算」**，不假装精确
 - **自动挑选中转枢纽**：按 12306 站点表里的**城市编码地理顺序**就近挑选 ——
   短途命中南京南/上海虹桥这类真正的换乘点，长途沿线路均匀铺开
+- **时间窗与排序**：`--depart-after/-before`、`--arrive-after/-before`、`--max-wait`，
+  以及按总耗时 / 到达 / 发车 / 换乘余量 / 票价排序
+- **席别筛选**：`--seat-class 二等座,硬卧`、`--no-standing`；指定席别时「最低合计」不再混席别
+- **近似方案**：`--near-miss 5` 单独列出「只差几分钟」的方案，由主人自己决定要不要冒险
+- **排除中转城市**：`--avoid 北京`，不增加请求
+- **请求预算**：`--max-queries 40` 硬上限，超出立即停止并标记 `partial_success`
+- **三段换乘**：`--legs 3 --via A,B` 显式链式换乘（不做自动三段，避免请求爆炸）
+- **多日扫描**：`--dates 2026-10-20..2026-10-22`，一次比较几天内的方案
+- **余票监控**：`--watch` 定时刷新，有票时桌面通知（带最小间隔与每轮请求预算）
 - **城市名 → 列出全部车站让你选**，不替你决定从哪个站走
 - **余票一并返回**，支持 `--require-seats` 只留有票方案
 - **票价查询（可选）**：`--with-price` 查各席别票价并给出最低合计；
-  因为每趟车要多一次请求，默认关闭并受 `--price-limit` 约束
-- **短途磁盘缓存 + 自适应节流 + 失败补查**，尽量避免触发 12306 限流
-- 输出人读报告或 `--format json` 结构化结果
-- 每条方案都打印 `缓冲 X 分钟（要求 ≥Y）✓`，一眼看到余量
+  票价单独缓存一天，避免反复查价
+- **短途磁盘缓存 + 自适应节流 + 失败补查 + 请求预算**，尽量避免触发 12306 限流
+- 输出人读报告或 `--format json` 结构化结果；每条方案都打印缓冲余量
 
 ---
 
 ## 安装
+
+### 安装前检查
+
+先确认 Python 和 pip 可用：
+
+```bash
+python --version        # 需要 3.10+
+python -m pip --version
+```
+
+Windows 上如果 `python` 不在 PATH，可改用 `py -3 --version`，并把下文命令里的 `python` 换成 `py -3`。
+Linux / macOS 上如果只有 `python3`，把 `python` 换成 `python3`。
+
+还要确认系统里有 **Edge 或 Chrome**。脚本必须驱动真实浏览器查询 12306，不能只用 curl；
+`--detect` 会告诉你找到的是哪一个。
 
 ### 方式一：作为 agent skill（Claude Code 等）
 
@@ -110,11 +139,33 @@ python -m pip install websocket-client
 python scripts/rail_transfer.py --detect
 ```
 
+### 方式三：pip / pipx / uvx
+
+装好后命令名是 `rail-transfer`，数据文件会安装到 `<prefix>/share/rail-transfer/references/`：
+
+```bash
+# 从源码目录安装，随后可直接调用
+python -m pip install .
+rail-transfer --detect
+
+# 或者用 pipx / uvx 隔离安装
+pipx install git+https://github.com/qijie233/china-rail-transfer.git
+uvx --from git+https://github.com/qijie233/china-rail-transfer.git rail-transfer --detect
+```
+
+开发时用可编辑安装：
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest -q
+python -m ruff check .
+```
+
 ### 环境要求
 
 | | |
 | --- | --- |
-| Python | **3.10+**（无第三方依赖，标准库够用） |
+| Python | **3.10+** |
 | `websocket-client` | 唯一依赖，用于驱动无头浏览器 |
 | 浏览器 | **Edge 或 Chrome**（必须是真实浏览器，原因见[工作原理](#工作原理)） |
 | 系统 | Windows / macOS / Linux 均可，脚本自动探测常见浏览器路径 |
@@ -123,6 +174,62 @@ Windows 上如果浏览器不在常见位置，可以持久保存一次：
 
 ```bash
 python scripts/rail_transfer.py --set-browser-path "D:/Edge/msedge.exe"
+```
+
+### 安装后验证
+
+无论用哪种方式安装，都先跑一次自检：
+
+```bash
+# 源码 / agent skill
+python scripts/rail_transfer.py --detect
+
+# pip / pipx / uvx 安装
+rail-transfer --detect
+```
+
+正常输出类似：
+
+```
+结果: ✅ 环境就绪，可以开始查询。
+
+浏览器：C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+websocket-client：已安装 1.9.2
+站点表：3404 个站，缓存 C:\Users\...\rail-transfer\station_name.js
+通勤时间表：已加载 ...\references\interchange-times.json
+枢纽表：已加载 ...\references\hubs.json
+站点缓冲表：已加载 ...\references\transfer-buffers.json
+```
+
+看到 `✅ 环境就绪` 即可开始查询。任何一项缺失，`下一步` 和 `失败分类` 会指出怎么补。
+
+### 安装常见问题
+
+| 现象 | 处理 |
+| --- | --- |
+| `No module named 'websocket'` | `python -m pip install websocket-client` |
+| 找不到 Edge/Chrome | 用 `--browser-path "浏览器路径"` 临时指定，或 `--set-browser-path "浏览器路径"` 持久保存 |
+| 浏览器启动后查询全失败 | 检查是否开着 Clash/VPN；脚本已加 `--no-proxy-server`，仍失败可暂时关闭系统代理 |
+| agent 不识别 skill | 目录名必须是 `rail-transfer`，`SKILL.md` 在仓库根目录 |
+| `pip install` 后找不到命令 | 确认 `<Python 安装目录>/Scripts` 在 PATH；也可用 `python -m rail_transfer_cli --help` 验证模块入口 |
+| pip 安装后数据文件缺失 | 重新安装；数据文件会放到 `<prefix>/share/rail-transfer/references/` |
+
+### 升级与卸载
+
+```bash
+# 源码安装：拉取后重新装开发依赖
+git pull
+python -m pip install -e ".[dev]"
+
+# pip 安装
+python -m pip install --upgrade .
+
+# pipx 安装
+pipx upgrade china-rail-transfer
+
+# 卸载
+python -m pip uninstall china-rail-transfer
+pipx uninstall china-rail-transfer
 ```
 
 ---
@@ -148,32 +255,179 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 -
 # 6. 带票价（注意：每趟车多一次请求，见「限流」一节）
 python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
     --via 上海 --with-price
+
+# 7. 时间窗 + 排序 + 席别
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --arrive-before 18:00 --seat-class 二等座 --sort arrive
+
+# 8. 只看「差一点点」的方案
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --via 南京 --near-miss 5
+
+# 9. 多日扫描
+python scripts/rail_transfer.py --from 太仓南 --to 句容 \
+    --dates 2026-10-18..2026-10-20 --via 上海
+
+# 10. 余票监控（有票时桌面通知，Ctrl+C 停止）
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --via 上海 --watch --interval 180
+
+# 11. 查询前询问换乘时间（人工使用；agent 也会先问主人）
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --via 上海 --ask-transfer
 ```
 
 输出示例（`--with-price`）：
 
 ```
 🚄 太仓南 → 句容    2026-10-18
-   最小换乘缓冲 16 分钟 · 跨站额外 +5 分钟 · 查询 9 次
+   最小换乘缓冲 16 分钟 · 跨站额外 +5 分钟 · 查询 3 次 · 排序 total
 
 ━━ 直达 ━━
    （无直达车）
 
 ━━ 中转换乘 ━━
- 1. 总耗时 2小时35分   最低合计 ¥145.0   换乘 上海虹桥（同站）
-    1) D3201   太仓南 07:43 → 上海虹桥 08:09   余票 二等16 硬座有   票价 无座¥17.0 二等座¥17.0 一等座¥27.0
-       ↓ 缓冲 25 分钟（要求 ≥16）✓
-    2) G3272   上海虹桥 08:34 → 句容 10:18   余票 一等1 二等无   票价 无座¥128.0 二等座¥128.0 一等座¥204.0
- 2. 总耗时 3小时43分   换乘 上海 → 上海虹桥（异站 · 上海） · 站间通勤 50 分
-    1) C3863   太仓南 18:12 → 上海 18:49
-       ↓ 缓冲 75 分钟（要求 ≥71）✓
-    2) G3380   上海虹桥 20:04 → 句容 21:55   余票 二等8 硬座有
+ 1. 总耗时 2小时35分   最低合计 ¥145.0   换乘 1 次
+    1) D3201   太仓南 07:43 → 上海虹桥 08:09   余票 一等有 二等有 无座有
+       票价 无座¥17.0 二等座¥17.0 一等座¥27.0
+       ↓ 缓冲 25 分钟（要求 ≥20）✓   换乘 上海虹桥（同站）
+    2) G3272   上海虹桥 08:34 → 句容 10:18   余票 商务3 一等13 二等有 无座有
+       票价 无座¥128.0 二等座¥128.0 一等座¥204.0
+ 2. 总耗时 3小时43分   换乘 1 次
+    1) C3863   太仓南 18:12 → 上海 18:49   余票 二等无 无座5
+       ↓ 缓冲 75 分钟（要求 ≥75）✓   换乘 上海 → 上海虹桥（异站 · 上海） · 站间通勤 50 分
+    2) G3380   上海虹桥 20:04 → 句容 21:55   余票 一等7 二等有 无座有
 ```
 
 跨站方案会明确标出「异站」、站间通勤时间和抬高后的缓冲要求。
-「最低合计」是两段各自最低席别相加，**可能混席别**，只作比价参考。
+注意示例里的「要求 ≥20」来自上海虹桥的站点缓冲；异站方案则是
+站间通勤 50 + 站点缓冲 20 + 跨站额外 5 = 75 分钟。
+未指定 `--seat-class` 时「最低合计」可能混席别；指定后只统计指定席别。
 
 ---
+
+## 使用指南
+
+这一节按「拿到需求 → 查询 → 读结果」的顺序说明。更细的参数见[主要参数](#主要参数)和各专题章节。
+
+### 推荐流程
+
+**agent 使用**：
+
+1. 主人给出出发站、到达站和日期。
+2. 若城市名对应多个车站，先把候选站列给主人选（`--stations`）。
+3. **先问换乘时间**：「两趟车之间至少留多少分钟？默认 16 分钟；同城异站会再加站间通勤和 5 分钟。」
+4. 用 `--min-transfer N` 查询；有明确中转站时加 `--via`，请求更少更稳。
+5. 读报告里的「缓冲 X 分钟（要求 ≥Y）✓」；不理想再调缓冲、时间窗或中转站。
+
+**人工命令行**：
+
+```bash
+# 最省事：查询前自动问换乘时间
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 --ask-transfer
+
+# 已经想好：直接给 25 分钟
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 --min-transfer 25 --via 上海
+```
+
+### 场景速查
+
+| 我想… | 加什么参数 |
+| --- | --- |
+| 只看直达 | 不给 `--via`，直接查 |
+| 指定中转站 | `--via 南京南` |
+| 指定中转城市（含同城异站） | `--via 上海` |
+| 让工具自动挑枢纽 | 省略 `--via` |
+| 城市有多个车站，先看清单 | `--stations 苏州` |
+| 城市所有车站一起搜 | `--all-stations` |
+| 手动设换乘时间 | `--min-transfer 25` |
+| 查询前问我换乘时间 | `--ask-transfer` |
+| 完全按手输值，不套站点加严 | `--min-transfer 10 --ignore-station-buffers` |
+| 18 点前到 | `--arrive-before 18:00` |
+| 早上 8 点后发车 | `--depart-after 08:00` |
+| 换乘最多等 90 分钟 | `--max-wait 90` |
+| 只要二等座 | `--seat-class 二等座 --require-seats` |
+| 不要无座 | `--no-standing` |
+| 按到达时间排序 | `--sort arrive` |
+| 看只差几分钟的方案 | `--near-miss 5` |
+| 不走北京中转 | `--avoid 北京` |
+| 看三天内哪天最好 | `--dates 2026-10-18..2026-10-20` |
+| 三段换乘 | `--legs 3 --via 南京南,徐州东` |
+| 查票价 | `--with-price` |
+| 监控余票 | `--watch --interval 180` |
+| 只盯某个车次 | `--watch --watch-trains G1234` |
+| 限制请求量 | `--max-queries 40` |
+| 给程序读 | `--format json` |
+
+### 输出怎么读
+
+```
+🚄 太仓南 → 句容    2026-10-18
+   最小换乘缓冲 16 分钟 · 跨站额外 +5 分钟 · 查询 3 次 · 排序 total
+```
+
+- 「最小换乘缓冲」是主人给的值；「跨站额外」是异站换乘的额外余量。
+- 「查询 3 次」是实际发往 12306 的请求数；缓存命中的不计入。
+
+每条换乘方案：
+
+```
+ 1. 总耗时 2小时35分   最低合计 ¥145.0   换乘 1 次
+    1) D3201   太仓南 07:43 → 上海虹桥 08:09   余票 一等有 二等有 无座有
+       票价 无座¥17.0 二等座¥17.0 一等座¥27.0
+       ↓ 缓冲 25 分钟（要求 ≥20）✓   换乘 上海虹桥（同站）
+    2) G3272   上海虹桥 08:34 → 句容 10:18   余票 商务3 一等13 二等有 无座有
+```
+
+- 「总耗时」从第一程发车算到最后一程到达，包含换乘等待。
+- 「最低合计」按每段最低价相加；没有指定 `--seat-class` 时可能混席别，只作比价参考。
+- 「缓冲 X 分钟（要求 ≥Y）」是能否赶上的判据：`✓` 表示满足，`✗` 只出现在「差一点点」区块。
+- 「要求」= `max(--min-transfer, 站点缓冲)`；异站还要加站间通勤和跨站额外。
+- 「（估算）」表示站间通勤时间来自默认值，不是人工核实过的站对。
+
+### JSON 输出与退出码
+
+`--format json` 输出 Command Outcome Schema：
+
+```json
+{
+  "status": "success",
+  "summary": "...",
+  "evidence": ["..."],
+  "next_action": "...",
+  "failure_category": null,
+  "data": {
+    "from": "...", "to": "...", "date": "...",
+    "min_transfer": 16,
+    "direct": [],
+    "plans": [],
+    "near_miss_plans": [],
+    "filters": {},
+    "budget": {"limit": 0, "used": 3, "exhausted": false},
+    "chain": false
+  }
+}
+```
+
+- 每条方案有 `legs`（逐段）和 `transfers`（逐换乘点）；同时保留 `leg1` / `leg2` 等旧字段。
+- `near_miss_plans` 与 `plans` 分开。
+- 多日扫描：`data.multi=true`，`data.results` 是每天的结果。
+- 监控模式：每轮一行 JSONL，包含 `time` / `cycle` / `status` / `available` / `new`。
+
+退出码：
+
+| 状态 | 退出码 |
+| --- | --- |
+| `success` / `partial_success` | 0 |
+| `failure` | 1 |
+| `blocked` | 2 |
+
+### 使用频率与安全
+
+- 这是查询工具，不提供下单、支付、占座、抢票。
+- 12306 会按累计请求量限流；优先用 `--via`，把自动枢纽数控制小，或用 `--max-queries` 设预算。
+- 余票缓存默认 10 分钟，票价缓存默认 24 小时；要最新数据用 `--no-cache` / `--price-cache-ttl 0`。
+- 长时间监控请 ≥3 分钟一轮，并用 `--watch-trains` 缩小范围。
 
 ## 主要参数
 
@@ -182,7 +436,8 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
 | `--from` / `--to` | 出发站、到达站（站名 / 城市名 / 拼音 / 电报码） |
 | `--date` | 乘车日期 `YYYY-MM-DD`，默认明天 |
 | `--via` | 指定中转站或城市，多个用逗号分隔；不给则自动挑 |
-| `--min-transfer` | 同站换乘最小缓冲分钟数，**默认 16** |
+| `--min-transfer` | 同站换乘最小缓冲分钟数，**默认 16**；不主动给时会先询问 |
+| `--ask-transfer` | 查询前从 stdin 询问最小换乘缓冲（可配合 `--min-transfer` 设默认值） |
 | `--cross-station-buffer` | 异站换乘的额外缓冲，默认 5 |
 | `--no-cross-station` | 完全不考虑同城异站换乘 |
 | `--all-stations` | 城市名展开为该城全部车站一起搜 |
@@ -195,9 +450,110 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
 | `--format json` | 输出结构化结果 |
 | `--stations` | 只解析车站，不查票（不启动浏览器） |
 | `--concurrency` | 并发查询数，默认 2 |
-| `--no-cache` / `--cache-ttl` | 查询结果磁盘缓存控制（默认 600 秒） |
+| `--no-cache` / `--cache-ttl` | 余票缓存控制（默认 600 秒） |
+| `--price-cache-ttl` | 票价缓存秒数，默认 86400（公布票价基本稳定） |
+| `--dates` / `--max-days` | 多日扫描范围 / 最多天数（默认 7） |
+| `--legs {2,3}` | 换乘段数；`3` 需配合两个 `--via` 形成链 |
+| `--avoid` | 排除作为中转的城市/车站，逗号分隔 |
+| `--seat-class` | 席别筛选，如 `二等座,硬卧`；也接受 `卧铺`、`坐票` |
+| `--no-standing` | 不把无座当作有票，并在输出中隐藏无座 |
+| `--depart-after` / `--depart-before` | 只看该发车时间窗内的方案（`HH:MM`） |
+| `--arrive-after` / `--arrive-before` | 只看该到达时间窗内的方案（`HH:MM`） |
+| `--max-wait` | 换乘等待上限（分钟） |
+| `--near-miss` | 额外列出差多少分钟以内的方案（默认 0 关闭） |
+| `--sort` | `total` / `arrive` / `depart` / `gap` / `price` |
+| `--max-queries` | 单次查询的请求硬上限（0 表示不限） |
+| `--watch` / `--interval` / `--watch-cycles` / `--watch-trains` / `--no-notify` | 余票监控 |
+| `--ignore-station-buffers` | 忽略站点级缓冲表，只用 `--min-transfer` |
 
 完整说明见 [`references/usage.md`](references/usage.md)。
+
+---
+
+## 时间窗、排序与席别
+
+```bash
+# 18 点前到，只要二等座，按到达时间排序
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --arrive-before 18:00 --seat-class 二等座 --sort arrive
+
+# 换乘等待最多 90 分钟，且只要卧铺
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --max-wait 90 --seat-class 卧铺
+```
+
+- 发车/到达时间窗作用于**整个行程**：发车看第一程，到达看最后一程。
+  跨天到达按真实日期比较：次日 01:00 不算「当天 22:00 前到达」。
+- `--sort price` 需要同时加 `--with-price`，否则没有票价可用，会退化为按总耗时排序。
+- 指定 `--seat-class` 后，两段（或三段）都必须有该席别余票；
+  「最低合计」只统计指定席别，不再混席别。
+- `--near-miss 5` 会把「比要求少 5 分钟以内」的方案单独放在
+  「差一点点的方案」区块里，**不会混进主方案**。
+
+---
+
+## 余票监控（`--watch`）
+
+```bash
+# 每 3 分钟查一次，有票就弹桌面通知；Ctrl+C 停止
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --via 上海 --watch --interval 180
+
+# 只盯两个车次，跑 10 轮后自动结束
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
+    --via 上海 --watch --watch-trains D3201,G3272 --watch-cycles 10
+
+# 不给 --via 也可以，让工具每轮自动挑枢纽
+python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 --watch
+```
+
+- 监控模式**每轮都绕过余票缓存**（票价缓存仍然保留），看到的是最新余票。
+- `--interval` 最小 **60 秒**；默认 180 秒。再快非常容易触发 12306 限流。
+- `--max-queries` 在监控模式下是**每轮**的请求预算。
+- 有票判定：直达车看该车次是否有座/卧票；换乘方案要求**每一段**都有座/卧票。
+- 桌面通知是尽力而为：Windows 用 PowerShell 气泡，macOS 用 `osascript`，
+  Linux 用 `notify-send`；没有通知环境时仍会打印 `🔔` 行。
+- `--watch-trains` 只关注列出的车次（大小写不敏感）。
+
+---
+
+## 多日扫描与三段换乘
+
+```bash
+# 三天内哪天方案最好
+python scripts/rail_transfer.py --from 太仓南 --to 句容 \
+    --dates 2026-10-18..2026-10-20 --via 上海
+```
+
+- 每一天都会完整执行一次查询；请求量按天数线性增长。
+  `--max-days`（默认 7）是硬上限，`--max-queries` 可以再压总预算。
+- JSON 输出里 `data.results` 是每天的完整结果，`data.dates` 是扫描的日期列表。
+- 加 `--with-price` 时，票价查询也是**每天各一份**；建议配合 `--max-queries` 使用。
+
+```bash
+# 三段换乘：出发 → 南京南 → 徐州东 → 到达
+python scripts/rail_transfer.py --from 某小站 --to 另一小站 --date 2026-10-18 \
+    --legs 3 --via 南京南,徐州东
+```
+
+- 三段换乘只支持**显式 `--via` 链**，不做自动三段：组合数和请求量都会爆炸。
+- 两个 `--via` 按顺序形成链；每一段都独立检查最小缓冲、站点缓冲和异站通勤。
+- 每段默认只查当天；加 `--allow-overnight` 后后两段会额外查次日。
+
+---
+
+## 请求预算、缓存与站点缓冲
+
+- `--max-queries N`：一次命令最多发 N 次真实请求（含重试与票价）。
+  超出后立即停止未完成的查询，结果标记为 `partial_success`，
+  并在报告里写明「请求预算耗尽」。对 agent 自动调用尤其有用。
+- **余票缓存**：默认 600 秒，键为「出发城市|到达城市|日期」，用 `--cache-ttl` 调整。
+- **票价缓存**：单独用 `--price-cache-ttl`（默认 86400 秒）保存。
+  公布票价基本稳定，没必要每次重查；想看最新价可以设成 0 或加 `--no-cache`。
+- **站点级缓冲**：[`references/transfer-buffers.json`](references/transfer-buffers.json)
+  给大枢纽设置 18~20 分钟的加严值。最终要求是
+  `max(--min-transfer, 站点缓冲)`；查不到的车站不额外加严，仍按 `--min-transfer`（默认 16 分钟）。
+  这份表是人工保守估计，不是官方数据；`--ignore-station-buffers` 可完全忽略。
 
 ---
 
@@ -206,11 +562,14 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
 这是本工具与官方中转最大的差别，规则是硬性的：
 
 ```
-同站换乘：  leg2.发车 − leg1.到达  ≥  min_transfer
-异站换乘：  leg2.发车 − leg1.到达  ≥  站间通勤时间 + min_transfer + cross_station_buffer
+同站换乘：  leg2.发车 − leg1.到达  ≥  max(min_transfer, 站点缓冲)
+异站换乘：  leg2.发车 − leg1.到达  ≥  站间通勤 + max(min_transfer, 站点缓冲) + cross_station_buffer
 ```
 
-- `--min-transfer`：默认 **16 分钟**
+- `--min-transfer`：默认 **16 分钟**，但**不会默默使用**：agent 会在拿到出发/到达站后先问主人；
+  命令行人工使用可加 `--ask-transfer`。主人说「默认」时才按 16 分钟算。
+- **站点缓冲**：大枢纽默认 18~20 分钟（见 `references/transfer-buffers.json`），
+  与 `--min-transfer` 取较大值；`--ignore-station-buffers` 可忽略
 - `--cross-station-buffer`：默认 **5 分钟**，给找站、安检排队留的额外余量
 - 站间通勤时间来自 [`references/interchange-times.json`](references/interchange-times.json)，
   查不到的站对用 `_default`（60 分钟）**保守估计，并在输出里标注「估算」**
@@ -326,14 +685,20 @@ china-rail-transfer/
 ├── SKILL.md                          # agent skill 主文档（触发条件、执行步骤、失败分类）
 ├── README.md                         # 本文件
 ├── LICENSE                           # MIT
+├── pyproject.toml                    # 打包、pytest、ruff 配置
+├── rail_transfer_cli.py              # pip 安装后的 console-script 入口
 ├── agents/
 │   └── openai.yaml                   # 部分 agent 平台的元数据
 ├── references/
 │   ├── usage.md                      # 详细用法、接口坑位、FAQ
 │   ├── hubs.json                     # 自动模式的枢纽候选（122 个，按站名）
-│   └── interchange-times.json        # 同城站间通勤时间（41 城）
-└── scripts/
-    └── rail_transfer.py              # 唯一入口，单文件，无第三方依赖
+│   ├── interchange-times.json        # 同城站间通勤时间（41 城）
+│   └── transfer-buffers.json         # 站点级同站换乘缓冲（人工保守估计）
+├── scripts/
+│   ├── __init__.py                   # 让源码布局可被 pytest / pip 导入
+│   └── rail_transfer.py              # 核心实现，单文件（标准库 + websocket-client）
+├── tests/                            # pytest 单元测试（不需要浏览器）
+└── .github/workflows/ci.yml          # Linux/Windows + Python 3.10/3.13
 ```
 
 ### 数据文件说明
@@ -344,8 +709,11 @@ china-rail-transfer/
   键写作 `"站A|站B"`，脚本自动双向匹配。
   数值是**从下车出站到抵达下一站进站口**的保守估计：以地铁为主、含步行与安检排队，
   取偏慢的常见值，不含极端拥堵。表里没有的站对一律按 60 分钟估算并标注「估算」。
+- **`transfer-buffers.json`** —— 站点级同站换乘缓冲（分钟）。
+  大枢纽取 18~20 分钟，查不到的车站不额外加严，仍按 `--min-transfer`（默认 16 分钟）；
+  最终要求与 `--min-transfer` 取较大值。
 
-这两个文件都是**人工整理**的，非常欢迎按你的实际体验提 PR 修正。
+这三个文件都是**人工整理**的，非常欢迎按你的实际体验提 PR 修正（也欢迎补测试）。
 
 ---
 
@@ -379,7 +747,21 @@ A：`queryTicketPrice` 返回的是该区间该席别的公布票价；若线路
 A：不能，也不会加。本项目只做查询与方案筛选，见[免责声明](#免责声明)。
 
 **Q：换了日期还要重新查吗？**
-A：要。缓存按「出发城市|到达城市|日期」为键，默认只保 600 秒，且余票是动态数据。
+A：要。余票缓存按「出发城市|到达城市|日期」为键，默认只保 600 秒，且余票是动态数据。
+票价缓存是单独的 24 小时（公布票价基本稳定）。
+
+**Q：`--watch` 会不会把 12306 惹毛？**
+A：设计上已经尽量保守：最小间隔 60 秒、每轮 `--max-queries` 预算、
+只查必要城市对。但长时间高频监控仍可能触发限流，建议 3 分钟以上一轮，
+必要时用 `--watch-trains` 缩小范围、用 `--via` 固定中转站。
+
+**Q：`--near-miss` 会不会把不安全方案混进结果？**
+A：不会。近似方案单独放在「差一点点的方案」区块，主方案列表仍然只包含
+严格满足缓冲要求的方案；JSON 里也是独立的 `near_miss_plans` 字段。
+
+**Q：三段换乘为什么不能自动挑枢纽？**
+A：两段自动模式已经会查十几个枢纽；三段再自动展开，请求量和组合数都会爆炸，
+很容易触发限流。所以只支持用户明确给出的 `--via A,B` 链。
 
 ---
 
@@ -388,11 +770,17 @@ A：要。缓存按「出发城市|到达城市|日期」为键，默认只保 6
 - **强依赖 12306 的私有接口**，官方未开放且可能随时变更。本项目开发期间就撞上过一次参数变更
   （`purpose_corporation` → `purpose_codes`）。接口若再变，本项目需要相应更新。
 - **票价是「每趟车一次请求」**，所以 `--with-price` 默认关闭并受 `--price-limit` 约束。
+- **票价缓存默认 24 小时**：公布票价稳定，但市场化浮动线路的价格可能变化；
+  要最新价请设 `--price-cache-ttl 0` 或加 `--no-cache`。
+- **站点缓冲表是人工保守估计**，不是 12306 官方数据；大站取 18~20 分钟，宁可多等。
+- **`--watch` 是持续请求**，即使有最小间隔和预算，长时间监控仍可能触发限流。
 - **票价取的是公布票价**；若线路执行市场化浮动定价，请以 12306 下单页为准。
-- **「最低合计」是两段各自最低席别相加，可能混席别**，只作比价参考。
+- **未指定 `--seat-class` 时，「最低合计」是各段最低席别相加（可能混席别）**，只作比价参考；
+  指定席别后只统计该席别。
 - **站间通勤时间是人工整理的保守估计**，不是实时路况。
 - 余票是动态数据，缓存 TTL 只有 10 分钟；要看最新余票请加 `--no-cache`。
 - 自动模式在长时间密集使用下仍可能触发限流（见上）。
+- **三段换乘只支持显式 `--via` 链**，不做自动三段。
 - 只在 Windows + Edge 上做过完整实测；macOS / Linux 的浏览器探测逻辑已写但未逐一验证。
 
 ---
@@ -409,6 +797,20 @@ A：要。缓存按「出发城市|到达城市|日期」为键，默认只保 6
 
 ---
 
+## 测试与开发
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest -q          # 80+ 个单元测试，不需要浏览器、不访问 12306
+python -m ruff check .
+```
+
+测试覆盖：站点解析、返回行下标映射、跨天/跨两天到达、缓存 TTL、
+两段与三段方案组合、站点缓冲、异站通勤、时间窗、席别筛选、近似方案、
+请求预算、JSON/文本渲染与监控匹配。CI 在 Linux 和 Windows、Python 3.10/3.13 上跑。
+
+---
+
 ## 贡献
 
 欢迎提 Issue 和 PR，特别是：
@@ -416,6 +818,7 @@ A：要。缓存按「出发城市|到达城市|日期」为键，默认只保 6
 - **补充 / 修正 [`references/interchange-times.json`](references/interchange-times.json)**
   里的同城站间通勤时间（附上你的实测数据最好）
 - 补充 [`references/hubs.json`](references/hubs.json) 的枢纽候选
+- 补充 / 修正 [`references/transfer-buffers.json`](references/transfer-buffers.json) 的站点换乘缓冲
 - 接口变更的适配
 - macOS / Linux 上的实测反馈
 
