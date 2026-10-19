@@ -64,10 +64,16 @@ def test_prepare_query_requires_two_via_for_three_legs(args_factory, table):
 
 
 def test_prepare_query_warns_price_sort_without_price(args_factory, table):
-    args = args_factory("--sort", "price")
+    args = args_factory("--sort", "price", "--no-price")
     setup, err = rt._prepare_query(args, table)
     assert err is None and setup is not None
-    assert any("--with-price" in w for w in setup["warnings"])
+    assert any("--sort price" in w for w in setup["warnings"])
+
+
+def test_price_enabled_by_default(args_factory):
+    assert args_factory().with_price is True
+    assert args_factory("--no-price").with_price is False
+    assert args_factory("--price-limit", "0").with_price is True
 
 
 def test_prepare_query_ignore_station_buffers(args_factory, table):

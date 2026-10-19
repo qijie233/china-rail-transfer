@@ -22,11 +22,11 @@ description: 当需要查询火车票中转换乘方案，调用自带脚本按�
 - `--to`：到达站（同上）
 - `--date`：乘车日期 `YYYY-MM-DD`，省略则默认明天
 - 可选 `--via`：中转站或中转城市，多个用逗号分隔；不给则自动挑选
-- 可选 `--with-price`：附带票价（**每趟车多一次请求**，默认关闭，见下）
+- 可选 `--no-price`：关闭票价查询（**票价默认开启**，每趟车多一次请求，见下）
 - 可选时间窗：`--depart-after/-before`、`--arrive-after/-before`（`HH:MM`）
 - 可选 `--max-wait`：换乘等待上限（分钟）
 - 可选 `--seat-class 二等座,硬卧` / `--no-standing`：席别约束
-- 可选 `--sort total|arrive|depart|gap|price`：排序（`price` 需配合 `--with-price`）
+- 可选 `--sort total|arrive|depart|gap|price`：排序（`price` 按票价排序）
 - 可选 `--near-miss N`：额外列出「差 N 分钟以内」的方案
 - 可选 `--avoid`：排除中转城市/车站
 - 可选 `--max-queries N`：请求硬上限（0 不限）
@@ -76,9 +76,9 @@ description: 当需要查询火车票中转换乘方案，调用自带脚本按�
 11. 三段换乘必须显式给两个 `--via`；不要尝试自动三段。
 12. 监控模式每轮绕过余票缓存、但保留 24 小时票价缓存；
     有票判定要求换乘方案的**每一段**都有座/卧票。
-13. 需要票价时加 `--with-price`。**票价是「每趟车一次额外请求」**，
-    会明显增加被限流的风险，因此默认关闭、并受 `--price-limit`（默认 8）约束；
-    建议与 `--via` 一起用，把总请求量控制在十次上下。
+13. **票价默认开启**（`--no-price` 关闭）。票价是「每趟车一次额外请求」，
+    受 `--price-limit`（默认 20）约束，并单独缓存 24 小时；
+    请求敏感时用 `--no-price`，或与 `--via` 一起用把总请求量控制在十次上下。
     指定 `--seat-class` 时，每程显示该席别价格并给出「双程合计 / 全程合计」；
     未指定时每程显示全席别最低价，合计可能混席别，只作比价参考。
 
@@ -111,15 +111,17 @@ description: 当需要查询火车票中转换乘方案，调用自带脚本按�
 
 - 默认输出人读报告：直达车次列表 + 换乘方案列表（两段或三段），每条方案逐段标注
   换乘站、同站/异站、站间通勤时间、缓冲余量与是否满足要求；满足要求的用 `✓`。
+  方案标题行给出「总耗时（两段运行 X + 换乘等待 Y）」；票价默认开启，
+  每程显示价格并在末尾输出「双程合计 / 全程合计」及每程明细（`--no-price` 关闭）。
   `--near-miss` 的方案单独放在「差一点点的方案」区块，用 `✗` 标注。
-  多日扫描输出每天一行的汇总；加 `--with-price` 时每程追加选定席别价格，
-  并在方案末尾输出「双程合计 / 全程合计」及每程明细。
+  多日扫描输出每天一行的汇总。
 - `--format json` 输出结构化结果，字段对齐 `shared/contracts.md` 的
   Command Outcome Schema：`status` / `summary` / `evidence` / `next_action` /
   `failure_category` / `data`。
 - `data` 里：每条方案有 `legs`（逐段车次）与 `transfers`（逐换乘点），
   同时保留旧版 `leg1` / `leg2` / `hub_arrive` 等兼容字段；
-  加 `--with-price` 后每段有 `selected_seat` / `selected_price`，
+  方案有 `rail_total` / `rail_min` / `wait_min`（运行与换乘等待拆分）；
+  票价默认查（`--no-price` 关闭），每段有 `selected_seat` / `selected_price`，
   方案有 `total_price` / `total_price_detail` / `total_price_note`；
   `near_miss_plans` 与 `plans` 分开；`budget` 记录请求预算用量；
   多日扫描用 `multi: true` + `results: [每日结果]`。

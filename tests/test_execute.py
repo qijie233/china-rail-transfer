@@ -178,3 +178,23 @@ def test_price_disk_cache_avoids_repeat(args_factory, table, row_factory,
                                   rt.RequestBudget(0))
     assert len(session.price_queries) == sent_after_first
     assert second["plans"][0]["total_price"] == first["plans"][0]["total_price"]
+
+
+def test_execute_query_prices_by_default(args_factory, table, disabled_cache,
+                                         row_factory, fake_session_cls):
+    args = args_factory("--via", "乙站")
+    prices = {"G1": {"O": "¥100.0"}, "G2": {"O": "¥80.0"}}
+    res, _ = _run(args, table,
+                  fake_session_cls(_simple_rows(row_factory), prices),
+                  disabled_cache)
+    assert res["plans"][0]["total_price"] == "¥180.0"
+    assert res["price_calls"] == 2
+
+
+def test_execute_query_no_price_skips(args_factory, table, disabled_cache,
+                                      row_factory, fake_session_cls):
+    args = args_factory("--via", "乙站", "--no-price")
+    session = fake_session_cls(_simple_rows(row_factory))
+    res, _ = _run(args, table, session, disabled_cache)
+    assert res["price_calls"] == 0
+    assert session.price_queries == []

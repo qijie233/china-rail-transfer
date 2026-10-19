@@ -82,7 +82,7 @@ DEFAULT_AUTO_HUBS = 16            # 自动模式枢纽数上限。实测 12306 �
                                   # 地理就近的十几个；要更全可以调大，代价是可能被限流。
 DEFAULT_CONCURRENCY = 2           # 并发越高越容易触发限流，默认保守
 DEFAULT_CACHE_TTL = 600           # 查询结果磁盘缓存秒数：反复微调参数时不必重复打 12306
-DEFAULT_PRICE_LIMIT = 8           # --with-price 时最多为多少趟车补票价（每趟一次请求）
+DEFAULT_PRICE_LIMIT = 20          # 默认最多为多少趟车补票价（每趟一次请求；--no-price 整体关闭）
 DEFAULT_PRICE_CACHE_TTL = 86400   # 公布票价基本稳定，单独缓存一天，避免反复查价
 DEFAULT_MAX_DAYS = 7              # --dates 一次最多扫描多少天
 DEFAULT_WATCH_INTERVAL = 180      # 余票监控默认间隔（秒）
@@ -332,6 +332,19 @@ class Plan:
 
     def min_gap(self) -> int:
         return min((t.gap_min for t in self.transfers), default=0)
+
+    def rail_min(self) -> int:
+        """各段列车实际运行时间合计（不含换乘等待）。"""
+        total = 0
+        for leg in self.legs:
+            dur = _duration_min(leg.lishi)
+            if dur:
+                total += dur
+        return total
+
+    def wait_min(self) -> int:
+        """换乘 + 等待时间 = 总耗时 − 各段运行合计。"""
+        return max(0, self.total_min() - self.rail_min())
 
     def cheapest_price(self, seat_classes: set[str] | None = None) -> float:
         total = 0.0
@@ -2031,6 +2044,10 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
     else:
         for i, p in enumerate(plans, 1):
             total_txt = f"总耗时 {p['total']}"
+            if p.get("rail_total") is not None:
+                run_label = "两段运行" if len(p.get("legs") or []) == 2 else "各段运行"
+                total_txt += (f"（{run_label} {p['rail_total']}"
+                              f" + 换乘等待 {_fmt_minutes(p.get('wait_min', 0))}）")
             if p.get("total_price"):
                 total_txt += f"   合计 {p['total_price']}"
             lines.append(f"{i:>2}. {total_txt}   换乘 {len(p.get('transfers') or [])} 次")
@@ -2039,7 +2056,7 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
             for j, leg in enumerate(legs, 1):
                 lines.append(f"    {j}) {leg['code']:<7} {leg['from_name']} "
                              f"{leg['dep']} → {leg['to_name']} {leg['arr']}"
-                             f"   余票 {leg['seats']}"
+                             f"   运行 {leg['lishi']}  余票 {leg['seats']}"
                              f"{_fmt_price(leg.get('prices') or {}, seat_classes)}")
                 if j <= len(transfers):
                     tr = transfers[j - 1]
@@ -2069,14 +2086,18 @@ def render_text(res: dict, table: StationTable, verbose: bool = False) -> str:
             short = min((t["required_min"] - t["gap_min"]
                          for t in (p.get("transfers") or [])
                          if t["gap_min"] < t["required_min"]), default=0)
-            lines.append(f"{i:>2}. 总耗时 {p['total']}   换乘 "
+            total_txt = f"总耗时 {p['total']}"
+            if p.get("rail_total") is not None:
+                total_txt += (f"（运行 {p['rail_total']} + 换乘等待 "
+                              f"{_fmt_minutes(p.get('wait_min', 0))}）")
+            lines.append(f"{i:>2}. {total_txt}   换乘 "
                          f"{len(p.get('transfers') or [])} 次   最紧处差 {short} 分钟")
             transfers = p.get("transfers") or []
             legs = p.get("legs") or []
             for j, leg in enumerate(legs, 1):
                 lines.append(f"    {j}) {leg['code']:<7} {leg['from_name']} "
                              f"{leg['dep']} → {leg['to_name']} {leg['arr']}"
-                             f"   余票 {leg['seats']}"
+                             f"   运行 {leg['lishi']}  余票 {leg['seats']}"
                              f"{_fmt_price(leg.get('prices') or {}, seat_classes)}")
                 if j <= len(transfers):
                     tr = transfers[j - 1]
@@ -2114,7 +2135,10 @@ def render_dates_text(res: dict, table: StationTable, verbose: bool = False) -> 
         near = len(item.get("near_miss_plans") or [])
         if best:
             trip = " → ".join(f"{leg['code']} {leg['dep']}" for leg in best["legs"])
-            detail = f"{trip}（{best['total']}）"
+            detail = f"{trip}（{best['total']}"
+            if best.get("rail_total"):
+                detail += f" · 运行 {best['rail_total']}"
+            detail += "）"
             if best.get("total_price"):
                 detail += f" {best['total_price']}"
         elif item["direct"]:
@@ -2411,7 +2435,7 @@ def _prepare_query(args, table: StationTable) -> tuple[dict | None, Outcome | No
         buffers.default = 0
 
     if args.sort == "price" and not args.with_price:
-        warnings.append("--sort price 需要配合 --with-price；没有票价时按总耗时排序")
+        warnings.append("--sort price 需要票价；当前被 --no-price/--price-limit 0 关闭，按总耗时排序")
 
     return {
         "from_codes": from_codes,
@@ -2988,6 +3012,7 @@ def _train_json(t: Train, table: StationTable, show_standing: bool = True,
         "start_name": table.name_of(t.start_code),
         "end_name": table.name_of(t.end_code),
         "dep": t.dep, "arr": t.arr, "lishi": t.lishi, "date": t.date,
+        "lishi_min": _duration_min(t.lishi) or 0,
         "dep_datetime": dep_dt.isoformat() if dep_dt else "",
         "arr_datetime": arr_dt.isoformat() if arr_dt else "",
         "seats": t.seats_text(show_standing),
@@ -3020,6 +3045,9 @@ def _plan_json(p: Plan, table: StationTable,
         "transfers": transfers,
         "total": _fmt_minutes(p.total_min()),
         "total_min": p.total_min(),
+        "rail_total": _fmt_minutes(p.rail_min()),
+        "rail_min": p.rail_min(),
+        "wait_min": p.wait_min(),
         "total_price": total_price,
         "total_price_detail": _price_detail(p, seat_classes),
         "total_price_note": ("指定席别" if seat_classes
@@ -3085,11 +3113,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--near-miss", type=int, default=0, metavar="MIN",
                    help="额外列出差多少分钟以内的方案（默认 0 关闭）")
     p.add_argument("--sort", choices=["total", "arrive", "depart", "gap", "price"],
-                   default="total", help="排序方式（默认 total；price 需 --with-price）")
-    p.add_argument("--with-price", action="store_true",
-                   help="附带票价（每趟车多一次请求，会明显增加被限流的风险）")
+                   default="total", help="排序方式（默认 total；price 按票价排序）")
+    p.add_argument("--with-price", dest="with_price", action="store_true",
+                   default=True,
+                   help="附带票价（默认开启；每趟车多一次请求，用 --no-price 关闭）")
+    p.add_argument("--no-price", dest="with_price", action="store_false",
+                   help="不查询票价：请求更少、输出更快")
     p.add_argument("--price-limit", type=int, default=DEFAULT_PRICE_LIMIT,
-                   help=f"--with-price 时最多为多少趟车查票价（默认 {DEFAULT_PRICE_LIMIT}；0 表示不查）")
+                   help=f"最多为多少趟车查票价（默认 {DEFAULT_PRICE_LIMIT}；0 表示不查）")
     p.add_argument("--price-cache-ttl", type=int, default=DEFAULT_PRICE_CACHE_TTL,
                    help=f"票价磁盘缓存秒数（默认 {DEFAULT_PRICE_CACHE_TTL}）")
     p.add_argument("--auto-hubs", type=int, default=DEFAULT_AUTO_HUBS,

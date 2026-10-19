@@ -53,7 +53,7 @@ python scripts/rail_transfer.py --from 句容西 --to 苏州 --date 2026-10-22 \
 
 # 带上票价（见第 5 节，注意请求量）
 python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
-    --via 上海 --seat-class 二等座 --with-price
+    --via 上海 --seat-class 二等座        # 默认查价；--no-price 关闭
 ```
 
 ### 3.1 时间窗、排序与席别
@@ -173,22 +173,22 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
 - 每条方案都会打印「缓冲 X 分钟（要求 ≥Y）」，脚本内部还有一道自检，
   不满足要求的方案不会输出。
 
-## 5. 票价查询（`--with-price`）
+## 5. 票价查询（默认开启）
 
 ### 用法
 
 ```bash
 python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
-    --via 上海 --seat-class 二等座 --with-price
+    --via 上海 --seat-class 二等座        # 默认查价；--no-price 关闭
 ```
 
 输出会逐程显示选定席别的价格，并在方案末尾给出**双程合计**：
 
 ```
- 1. 总耗时 2小时35分   合计 ¥145.0   换乘 1 次
-    1) D3201   太仓南 07:43 → 上海虹桥 08:09   余票 一等有 二等有 无座有   二等座 ¥17.0
+ 1. 总耗时 2小时35分（两段运行 2小时10分 + 换乘等待 25分）   合计 ¥145.0   换乘 1 次
+    1) D3201   太仓南 07:43 → 上海虹桥 08:09   运行 00:26  余票 一等有 二等有 无座有   二等座 ¥17.0
        ↓ 缓冲 25 分钟（要求 ≥20）✓   换乘 上海虹桥（同站）
-    2) G3272   上海虹桥 08:34 → 句容 10:18   余票 商务3 一等13 二等有 无座有   二等座 ¥128.0
+    2) G3272   上海虹桥 08:34 → 句容 10:18   运行 01:44  余票 商务3 一等13 二等有 无座有   二等座 ¥128.0
     ── 双程合计 ¥145.0（二等座 ¥17.0 + 二等座 ¥128.0）
 ```
 
@@ -201,8 +201,8 @@ python scripts/rail_transfer.py --from 太仓南 --to 句容 --date 2026-10-18 \
 **票价是「每趟车一次额外请求」**，不加限制很容易触发 12306 限流（见第 7 节）。
 所以：
 
-- `--with-price` **默认关闭**，需要才加。
-- `--price-limit`（默认 8）限制最多为多少趟车查票价，实际请求量上限约 `2 × price-limit`。
+- 票价**默认开启**；请求敏感时加 `--no-price`。
+- `--price-limit`（默认 20）限制最多为多少趟车查票价，实际请求量上限约 `2 × price-limit`。
 - 同一「车次 + 区间 + 日期」只查一次，内存 + 磁盘双层缓存；
   磁盘票价缓存默认 **24 小时**（`--price-cache-ttl`），因为公布票价基本稳定。
 - 建议配合 `--via` 使用：基础查询本来就只要 2~4 次，加票价总共约 10 次上下。
@@ -336,7 +336,7 @@ python scripts/rail_transfer.py ... --format json
     "plans": [{
       "legs": [
         {"code": "D3201", "from_name": "太仓南", "to_name": "上海虹桥",
-         "dep": "07:43", "arr": "08:09", "lishi": "00:26",
+         "dep": "07:43", "arr": "08:09", "lishi": "00:26", "lishi_min": 26,
          "seats": "二等16 硬座有", "has_seat": true,
          "selected_seat": "二等座", "selected_price": "¥17.0",
          "dep_datetime": "2026-10-18T07:43:00",
@@ -351,6 +351,7 @@ python scripts/rail_transfer.py ... --format json
         "near_miss": false
       }],
       "total": "2小时35分", "total_min": 155,
+      "rail_total": "2小时10分", "rail_min": 130, "wait_min": 25,
       "total_price": "¥145.0",
       "total_price_detail": [
         {"code": "D3201", "seat": "二等座", "price": "¥17.0"},
@@ -373,14 +374,17 @@ python scripts/rail_transfer.py ... --format json
 
 - 每条方案用 `legs`（逐段）与 `transfers`（逐换乘点）描述，两段和三段一致；
   同时保留旧版 `leg1` / `leg2` / `hub_arrive` / `gap_min` 等字段，方便旧调用方。
+- `total` = `rail_total`（各段运行之和）+ `wait_min`（换乘等待，含跨站通勤）；
+  车次级的 `lishi_min` 是单段运行分钟数。
 - `near_miss_plans` 与 `plans` 分开，不会混在一起。
 - `budget` 记录请求预算上限、实际用量与是否耗尽。
 - 多日扫描的 `data` 是 `multi: true` + `results: [每日结果]` + `dates`。
 - 监控模式的 JSON 是每轮一行 JSONL（`time` / `cycle` / `available` / `new`），
   不额外输出汇总对象。
 
-未加 `--with-price` 时，`prices` 为空对象 `{}`、`total_price` / `min_total`
-为空字符串、`total_price_detail` 为空数组。
+加 `--no-price` 时，`prices` 为空对象 `{}`、`total_price` / `min_total`
+为空字符串、`total_price_detail` 为空数组；`rail_total` / `rail_min` / `wait_min`
+与票价无关，始终输出。
 
 退出码：`success` / `partial_success` → 0，`blocked` → 2，`failure` → 1。
 

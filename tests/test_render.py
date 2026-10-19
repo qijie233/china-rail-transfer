@@ -108,3 +108,21 @@ def test_collect_watch_matches_filters_codes():
     }
     assert rt._collect_watch_matches(res, {"G8"}) == []
     assert len(rt._collect_watch_matches(res, {"g9"})) == 1
+
+
+def test_plan_json_has_rail_time_split(table, train_factory):
+    pj = rt._plan_json(_plan(train_factory), table, {"二等座"})
+    # 08:00→10:00 + 10:30→12:00：总 240 分，运行 210 分，等待 30 分
+    assert pj["total_min"] == 240
+    assert pj["rail_min"] == 210
+    assert pj["wait_min"] == 30
+    assert pj["rail_total"] == "3小时30分"
+    assert pj["legs"][0]["lishi_min"] == 120
+    assert pj["legs"][1]["lishi_min"] == 90
+
+
+def test_render_text_shows_rail_and_wait_split(table, train_factory):
+    text = rt.render_text(_res(_plan(train_factory), table, {"二等座"}), table)
+    assert "两段运行 3小时30分" in text
+    assert "换乘等待 30分" in text
+    assert "运行 02:00" in text
